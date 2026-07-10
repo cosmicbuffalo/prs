@@ -20,6 +20,18 @@ const (
 // error) stays visible before auto-clearing.
 const statusDuration = 2 * time.Second
 
+// layoutMode selects how the list and detail panels are arranged.
+type layoutMode int
+
+const (
+	// layoutHorizontal is the default: PR list on the left, detail on the
+	// right, side by side.
+	layoutHorizontal layoutMode = iota
+	// layoutVertical stacks them: PR list across the full width on the top
+	// half, detail across the full width on the bottom half.
+	layoutVertical
+)
+
 // detailScrollStep is how many lines ctrl+d/ctrl+u scroll the detail panel
 // per press.
 const detailScrollStep = 8
@@ -106,6 +118,24 @@ type Model struct {
 
 	width  int
 	height int
+
+	// layout selects horizontal (list left / detail right) or vertical (list
+	// top / detail bottom); toggled with "v". Defaults to horizontal.
+	layout layoutMode
+
+	// showHelp toggles the floating keymap overlay (opened with "?"). The
+	// footer only shows a few essential hints; the full list lives here.
+	showHelp bool
+
+	// newDetailFetching / newDetailLoaded track lazy per-PR fetches for NEW
+	// items (keyed by Item.Key): NEW PRs are built from search metadata only,
+	// so their comments/reviews/commits are fetched on demand the first time
+	// the user selects them. "fetching" marks an in-flight request (so we
+	// don't launch duplicates and can show a loading note); "loaded" marks a
+	// completed one (so we don't refetch). Both are reset on a full refresh,
+	// since that rebuilds the NEW items from scratch.
+	newDetailFetching map[string]bool
+	newDetailLoaded   map[string]bool
 
 	activeTab int
 	items     [4][]Item // indexed by tabOutstanding / tabNew / tabDone / tabIgnored

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // maxDetailTextRunes caps how long a single detail entry's text can be
@@ -29,11 +30,6 @@ const (
 	timestampColWidth = 14
 	detailColumnGap   = 2
 )
-
-// listEntryLines is how many terminal lines each PR occupies in the list
-// pane: 3 content lines (title, section/badge bullet, latest-activity
-// bullet) plus 1 blank separator line.
-const listEntryLines = 4
 
 // columnGutter is the fixed-width blank gap between the list and detail
 // columns in the body layout.
@@ -101,6 +97,12 @@ func (m Model) View() string {
 		body = m.renderLoading(bodyHeight)
 	} else {
 		body = m.renderBody(bodyHeight)
+	}
+
+	// The help overlay floats on top of the current body (list/detail stay
+	// visible behind it) rather than replacing it.
+	if m.showHelp {
+		body = overlayBox(body, helpBox(), m.width, bodyHeight)
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, topMargin, header, tabBar, tabBarSpacer, body, status, footer)
@@ -275,6 +277,106 @@ func (m Model) renderStatus() string {
 	return ""
 }
 
+// helpBox builds the full keymap reference as a bordered box — the "floating"
+// window opened with "?" (composited onto the body by overlayBox). The footer
+// only carries a handful of essential hints; everything else lives here, with a
+// grayed-out "Esc/q to close" hint centered along the bottom.
+func helpBox() string {
+	rows := [][2]string{
+		{"↓ ↑ / j k", "move cursor"},
+		{"← → / h l", "switch tab"},
+		{"Enter", "toggle done"},
+		{"i", "toggle ignore"},
+		{"o", "copy PR link"},
+		{"v", "toggle layout"},
+		{"^d / ^u", "scroll detail"},
+		{"r", "refresh"},
+		{"?", "toggle help"},
+		{"q", "quit"},
+	}
+
+	keyW := 0
+	for _, r := range rows {
+		if w := lipgloss.Width(r[0]); w > keyW {
+			keyW = w
+		}
+	}
+
+	var rowLines []string
+	for _, r := range rows {
+		rowLines = append(rowLines, styleYellow.Render(padRight(r[0], keyW))+"   "+r[1])
+	}
+
+	// Center the title and the dismiss hint over the widest shortcut row.
+	contentW := 0
+	for _, l := range rowLines {
+		if w := lipgloss.Width(l); w > contentW {
+			contentW = w
+		}
+	}
+	title := lipgloss.PlaceHorizontal(contentW, lipgloss.Center, styleBold.Render("Keyboard shortcuts"))
+	hint := lipgloss.PlaceHorizontal(contentW, lipgloss.Center, styleGray.Render("Esc/q to close"))
+
+	lines := append([]string{title, ""}, rowLines...)
+	lines = append(lines, "", hint)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorGray).
+		Padding(1, 3).
+		Render(strings.Join(lines, "\n"))
+}
+
+// overlayBox composites box centered on top of base (a width×height rendered
+// area), so the box appears to float over the existing content instead of
+// replacing it. It's ANSI-aware: on each row the box occupies, the base cells
+// to the left and right of the box are preserved (with a reset inserted around
+// the box so neither side's styling bleeds into the other).
+func overlayBox(base, box string, width, height int) string {
+	baseLines := strings.Split(base, "\n")
+	for len(baseLines) < height {
+		baseLines = append(baseLines, "")
+	}
+
+	boxLines := strings.Split(box, "\n")
+	boxW := 0
+	for _, l := range boxLines {
+		if w := ansi.StringWidth(l); w > boxW {
+			boxW = w
+		}
+	}
+
+	top := (height - len(boxLines)) / 2
+	if top < 0 {
+		top = 0
+	}
+	left := (width - boxW) / 2
+	if left < 0 {
+		left = 0
+	}
+
+	for i, bl := range boxLines {
+		row := top + i
+		if row >= len(baseLines) {
+			break
+		}
+		baseLine := baseLines[row]
+
+		leftPart := ansi.Truncate(baseLine, left, "")
+		if w := ansi.StringWidth(leftPart); w < left {
+			leftPart += strings.Repeat(" ", left-w)
+		}
+		if w := ansi.StringWidth(bl); w < boxW {
+			bl += strings.Repeat(" ", boxW-w)
+		}
+		rightPart := ansi.TruncateLeft(baseLine, left+boxW, "")
+
+		baseLines[row] = leftPart + "\x1b[0m" + bl + "\x1b[0m" + rightPart
+	}
+
+	return strings.Join(baseLines, "\n")
+}
+
 func (m Model) renderLoading(height int) string {
 	repo := m.repo
 	if repo == "" {
@@ -321,10 +423,14 @@ const (
 	rowBodyStart    = 6
 )
 
-// overListColumn reports whether screen column x falls within the list
-// (left) column rather than the detail (right) column — used to route mouse
-// wheel scrolling to whichever panel the cursor is actually over.
-func (m Model) overListColumn(x int) bool {
+// overListPanel reports whether screen position (x, y) falls within the list
+// panel rather than the detail panel — used to route mouse wheel scrolling to
+// whichever panel the pointer is over. In horizontal layout the split is by
+// column (list on the left); in vertical layout it's by row (list on top).
+func (m Model) overListPanel(x, y int) bool {
+	if m.layout == layoutVertical {
+		return y < rowBodyStart+m.listViewportHeight()
+	}
 	leftWidth, _ := m.columnWidths()
 	return x < leftMargin+leftWidth
 }
@@ -343,26 +449,38 @@ func (m Model) hitTestTab(x, y int) (int, bool) {
 }
 
 // hitTestListItem returns the index (into the active tab's item slice) of
-// the list entry at screen position (x, y), if any.
+// the list entry at screen position (x, y), if any. Because entries are
+// variable-height, it walks their cumulative row counts (from the first
+// visible entry) to find which one contains the clicked row.
 func (m Model) hitTestListItem(x, y int) (int, bool) {
+	width := m.listContentWidth()
+	if x < leftMargin || x >= leftMargin+width {
+		return 0, false
+	}
+	// In vertical layout the list only occupies the top half of the body;
+	// clicks below it belong to the detail panel, not the list.
+	if m.layout == layoutVertical && y >= rowBodyStart+m.listViewportHeight() {
+		return 0, false
+	}
+
 	row := y - rowBodyStart - 1 // -1 for the reserved top indicator line
 	if row < 0 {
 		return 0, false
 	}
-	leftWidth, _ := m.columnWidths()
-	if x < leftMargin || x >= leftMargin+leftWidth {
-		return 0, false
-	}
 
-	items, start, end := m.listWindow(m.bodyHeight())
+	items, start, end := m.listWindow(width, m.listViewportHeight())
 	if len(items) == 0 {
 		return 0, false
 	}
-	idx := start + row/listEntryLines
-	if idx < start || idx >= end {
-		return 0, false
+	counts := m.entryLineCounts(m.activeTab, width)
+	acc := 0
+	for i := start; i < end; i++ {
+		if row < acc+counts[i] {
+			return i, true
+		}
+		acc += counts[i]
 	}
-	return idx, true
+	return 0, false
 }
 
 // bodyHeight returns how many rows are available for the body area (the
@@ -386,6 +504,15 @@ func (m Model) bodyHeight() int {
 }
 
 func (m Model) renderBody(height int) string {
+	if m.layout == layoutVertical {
+		return m.renderBodyVertical(height)
+	}
+	return m.renderBodyHorizontal(height)
+}
+
+// renderBodyHorizontal is the default side-by-side arrangement: PR list in the
+// left column, detail in the right column.
+func (m Model) renderBodyHorizontal(height int) string {
 	leftWidth, rightWidth := m.columnWidths()
 
 	margin := lipgloss.NewStyle().Width(leftMargin).Height(height).Render("")
@@ -396,13 +523,88 @@ func (m Model) renderBody(height int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, margin, listBox, gutter, detailBox)
 }
 
+// renderBodyVertical stacks the panels: PR list across the full width on the
+// top half, detail across the full width on the bottom half.
+func (m Model) renderBodyVertical(height int) string {
+	topH := m.listViewportHeight()
+	if topH > height {
+		topH = height
+	}
+	botH := height - topH
+	if botH < 0 {
+		botH = 0
+	}
+
+	innerWidth := m.width - leftMargin
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	marginStyle := lipgloss.NewStyle().Width(leftMargin)
+
+	listMargin := marginStyle.Height(topH).Render("")
+	listBox := lipgloss.NewStyle().Width(innerWidth).Height(topH).Render(m.renderList(innerWidth, topH))
+	top := lipgloss.JoinHorizontal(lipgloss.Top, listMargin, listBox)
+
+	detailMargin := marginStyle.Height(botH).Render("")
+	detailBox := lipgloss.NewStyle().Width(innerWidth).Height(botH).Render(m.renderDetail(innerWidth, botH, m.detailScroll))
+	bottom := lipgloss.JoinHorizontal(lipgloss.Top, detailMargin, detailBox)
+
+	return lipgloss.JoinVertical(lipgloss.Left, top, bottom)
+}
+
+// listContentWidth is the column width available to each list entry — the left
+// column in horizontal layout, or the full width (minus the left margin) in
+// vertical layout. Shared by the renderer and the scroll-window math so wrap
+// depth (and thus entry heights) are measured against the same width the list
+// is actually drawn at.
+func (m Model) listContentWidth() int {
+	if m.layout == layoutVertical {
+		w := m.width - leftMargin
+		if w < 1 {
+			w = 1
+		}
+		return w
+	}
+	left, _ := m.columnWidths()
+	return left
+}
+
+// listViewportHeight is the number of body rows the list panel occupies: the
+// full body height in horizontal layout, or the top half in vertical layout
+// (matching renderBodyVertical's split).
+func (m Model) listViewportHeight() int {
+	if m.layout == layoutVertical {
+		h := m.bodyHeight() / 2
+		if h < 1 {
+			h = 1
+		}
+		return h
+	}
+	return m.bodyHeight()
+}
+
+// entryLineCounts returns, for each item in tab, the number of terminal rows
+// its rendered block occupies at the given content width — its content lines
+// (title + possibly-wrapped bullet + summary) plus the one trailing separator
+// row. The scroll-window math (listWindow / clampListScroll) and the renderer
+// share this so they always agree on where variable-height entries begin and
+// end.
+func (m Model) entryLineCounts(tab, width int) []int {
+	items := m.items[tab]
+	counts := make([]int, len(items))
+	for i, it := range items {
+		counts[i] = len(m.renderListEntry(it, false, width)) + 1
+	}
+	return counts
+}
+
 // renderList renders the current tab's PR list, windowed (manual scroll
 // offset) so the selected item is always visible when the list is taller
 // than the available height. Each item renders as a fixed listEntryLines-line
 // block, so the windowing math operates in item-count units and only
 // converts to line-count when actually joining the rendered lines.
 func (m Model) renderList(width, height int) string {
-	items, start, end := m.listWindow(height)
+	items, start, end := m.listWindow(width, height)
 	if len(items) == 0 {
 		return styleDim.Render("Nothing here.")
 	}
@@ -444,45 +646,42 @@ func centerGray(s string, width int) string {
 	return strings.Repeat(" ", left) + styleGray.Render(s) + strings.Repeat(" ", right)
 }
 
-// listItemsPerPage returns how many PR entries fit in the list column at
-// the current terminal size — one line is always reserved at the top for
-// the "↑ (N more)" indicator (see renderList), so this is (bodyHeight-1)
-// divided by the fixed per-entry line count. Shared by listWindow (to pick
-// which items are visible) and clampListScroll (update.go, to decide when
-// the window needs to move) so the two can never drift out of sync.
-func (m Model) listItemsPerPage() int {
-	itemsPerPage := (m.bodyHeight() - 1) / listEntryLines
-	if itemsPerPage < 1 {
-		itemsPerPage = 1
-	}
-	return itemsPerPage
-}
-
-// listWindow computes the current tab's item slice and the [start, end)
-// range of it that's actually visible, using the tab's persisted
-// listScroll offset (see clampListScroll in update.go for how that's kept
-// in sync with the cursor). Shared by renderList (to render exactly that
-// window) and mouse click hit-testing (to map a clicked row back to an item
-// index) so the two can never drift out of sync. The height parameter is
-// unused for the scroll offset itself (that comes from m.listScroll) but is
-// kept so callers don't need m.bodyHeight() duplicated at each call site.
-func (m Model) listWindow(height int) (items []Item, start, end int) {
+// listWindow computes the current tab's item slice and the [start, end) range
+// of it that's actually visible, packing variable-height entries into the
+// available rows from the tab's persisted listScroll offset (kept cursor-
+// visible by clampListScroll in update.go). One row is always reserved at the
+// top for the "↑ (N more)" indicator. At least the first entry is always
+// included even if it's taller than the viewport. Shared by renderList (to
+// render exactly that window) and mouse hit-testing (to map a clicked row back
+// to an item index) so the two can never drift out of sync.
+func (m Model) listWindow(width, height int) (items []Item, start, end int) {
 	items = m.items[m.activeTab]
 	if len(items) == 0 {
 		return items, 0, 0
 	}
 
-	itemsPerPage := m.listItemsPerPage()
-	start = m.listScroll[m.activeTab]
-	if start > len(items)-itemsPerPage {
-		start = len(items) - itemsPerPage
+	counts := m.entryLineCounts(m.activeTab, width)
+	avail := height - 1 // one row reserved for the top "↑ (N more)" indicator
+	if avail < 1 {
+		avail = 1
 	}
+
+	start = m.listScroll[m.activeTab]
 	if start < 0 {
 		start = 0
 	}
-	end = start + itemsPerPage
-	if end > len(items) {
-		end = len(items)
+	if start > len(items)-1 {
+		start = len(items) - 1
+	}
+
+	used := 0
+	end = start
+	for end < len(items) {
+		if used+counts[end] > avail && end > start {
+			break
+		}
+		used += counts[end]
+		end++
 	}
 	return items, start, end
 }
@@ -517,11 +716,18 @@ func (m Model) renderListEntry(item Item, selected bool, width int) []string {
 	cap := func(line string) string {
 		return lipgloss.NewStyle().MaxWidth(contentWidth).Render(line)
 	}
-	return []string{
-		bar + cap(titleLine),
-		bar + cap(renderEntryBulletLine(item, contentWidth)),
-		bar + cap(renderEntrySummaryLine(item, contentWidth)),
+
+	// The bullet line can wrap onto multiple rows in a narrow column (see
+	// renderEntryBulletLines) — this is what makes list entries variable-
+	// height. The title and summary are always exactly one row each. The
+	// cursor bar is repeated down every row of the entry, wrapped bullet rows
+	// included, so the selection reads as one contiguous block.
+	out := []string{bar + cap(titleLine)}
+	for _, bl := range renderEntryBulletLines(item, contentWidth) {
+		out = append(out, bar+cap(bl))
 	}
+	out = append(out, bar+cap(renderEntrySummaryLine(item, contentWidth)))
+	return out
 }
 
 // renderEntryTitleLine renders the "(#<number>) <title>" line, right-padded
@@ -547,69 +753,40 @@ func renderEntryTitleLine(item Item, width int) string {
 // list entry's title line.
 const entryBulletPrefix = "  - "
 
-// renderEntryBulletLine renders the second list-entry line: "NEW" (yellow)
-// for PRs the user hasn't touched at all, "AUTHOR" for authored items, or
-// "REVIEWER " + the existing bracketed badge label for reviewing items.
-func renderEntryBulletLine(item Item, width int) string {
+// renderEntryBulletLines renders the second list-entry "bullet" as one or more
+// rows: "NEW" (yellow) for PRs the user hasn't touched, "AUTHOR" for authored
+// items, or "REVIEWER " + the bracketed badge label for reviewing items,
+// followed by the "(updated X ago)" recency suffix and the review-icon
+// sequence. Unlike before, nothing is dropped in a narrow column — the whole
+// bullet word-wraps instead, with continuation rows hanging-indented to align
+// under where the content begins after "- " (not back at the cursor bar).
+func renderEntryBulletLines(item Item, width int) []string {
 	// A PR whose per-PR data failed to load shows a red error marker in place
 	// of the usual section/badge line — the normal "updated X ago"/icons don't
 	// apply since we never got the data to compute them.
 	if item.FetchError != "" {
-		budget := width - len(entryBulletPrefix)
-		if budget < 1 {
-			budget = 1
-		}
-		return entryBulletPrefix + errorStyle.Render(truncateRunes("⚠ failed to load", budget))
+		return wrapWithHangingIndent(entryBulletPrefix, errorStyle.Render("⚠ failed to load"), width)
 	}
 
-	avail := width - len(entryBulletPrefix)
-	if avail < 1 {
-		avail = 1
-	}
-
-	// Build the highest-priority "label" part first: the section word plus,
-	// for reviewing items, the bracketed review-state tag (e.g. "[APPROVED]").
-	// The state tag is only truncated if the label itself can't fit — it's
-	// never sacrificed to make room for the lower-priority trailing bits.
-	var labelPlain, labelRendered string
+	// The section word plus, for reviewing items, the bracketed review-state
+	// tag (e.g. "[APPROVED]").
+	var labelRendered string
 	switch item.Section {
 	case SectionNew:
-		labelPlain = truncateRunes("NEW", avail)
-		labelRendered = styleYellow.Render(labelPlain)
+		labelRendered = styleYellow.Render("NEW")
 	case SectionAuthored:
-		labelPlain = truncateRunes("AUTHOR", avail)
-		labelRendered = sectionAuthorStyle.Render(labelPlain)
+		labelRendered = sectionAuthorStyle.Render("AUTHOR")
 	default:
 		word := "REVIEWER"
-		labelBudget := avail - lipgloss.Width(word) - 1
-		if labelBudget < 0 {
-			labelBudget = 0
-		}
-		state := truncateRunes(reviewStateLabel(item.Badge), labelBudget)
-		labelPlain = word + " " + state
 		badgeStyle := lipgloss.NewStyle().Foreground(reviewStateColor(item.Badge))
-		labelRendered = sectionReviewStyle.Render(word) + " " + badgeStyle.Render(state)
+		labelRendered = sectionReviewStyle.Render(word) + " " + badgeStyle.Render(reviewStateLabel(item.Badge))
 	}
 
-	// Trailing bits, lower priority than the label and appended only if they
-	// fit in the leftover space: first the "(updated X ago)" recency suffix,
-	// then the review-icon sequence. In a narrow column these drop off (icons
-	// first, then the suffix) rather than overlapping or crowding out the
-	// review-state tag.
-	used := lipgloss.Width(labelPlain)
-	out := entryBulletPrefix + labelRendered
-
-	suffix := " (updated " + relativeTime(item.TriggerDate) + ")"
-	if used+lipgloss.Width(suffix) <= avail {
-		out += styleDim.Render(suffix)
-		used += lipgloss.Width(suffix)
-	}
+	content := labelRendered + styleDim.Render(" (updated "+relativeTime(item.TriggerDate)+")")
 	if icons := renderReviewIconSequence(item.Reviewers); icons != "" {
-		if used+1+lipgloss.Width(icons) <= avail {
-			out += " " + icons
-		}
+		content += " " + icons
 	}
-	return out
+	return wrapWithHangingIndent(entryBulletPrefix, content, width)
 }
 
 // renderEntrySummaryLine renders the third list-entry line: a dim one-line
@@ -692,7 +869,7 @@ func (m Model) renderDetail(width, height, scroll int) string {
 		var lines []string
 		lines = append(lines, styleOrange.Render(truncateRunes(item.URL, innerWidth)))
 		for _, l := range strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(item.Title), "\n") {
-			lines = append(lines, styleBold.Render(l))
+			lines = append(lines, styleTitle.Render(l))
 		}
 		lines = append(lines, "")
 		lines = append(lines, errorStyle.Render(truncateRunes("⚠ Failed to load this PR's details", innerWidth)))
@@ -712,7 +889,7 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	header = append(header, styleOrange.Render(truncateRunes(item.URL, innerWidth)))
 	titleLines := strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(item.Title), "\n")
 	for _, l := range titleLines {
-		header = append(header, styleBold.Render(l))
+		header = append(header, styleTitle.Render(l))
 	}
 	// For New items, Baseline is just the PR's creation date — the same
 	// thing the PR Details section's "<author> opened X ago" line already
@@ -733,12 +910,22 @@ func (m Model) renderDetail(width, height, scroll int) string {
 		shown = shown[hidden:] // Detail is sorted ascending; the tail is the most recent.
 		hiddenNote = styleGray.Render(fmt.Sprintf(" (not showing %d older comments)", hidden))
 	}
+	// Shared across the Comments and Commits sections so both align their
+	// content to the same column, sized to the widest timestamp actually shown.
+	tsColWidth := maxTimestampWidth(shown, item.Commits)
+
 	scrollable = append(scrollable, styleBold.Render("Comments")+hiddenNote)
 	if len(shown) == 0 {
-		scrollable = append(scrollable, styleDim.Render(truncateRunes("No comments/reviews.", innerWidth)))
+		// A NEW PR whose per-PR data is still being lazily fetched shows a
+		// loading note rather than the "none" message (see ensureNewDetail).
+		empty := "No comments/reviews."
+		if item.Section == SectionNew && m.newDetailFetching[item.Key] {
+			empty = "Loading…"
+		}
+		scrollable = append(scrollable, styleDim.Render(truncateRunes(empty, innerWidth)))
 	}
 	for _, d := range shown {
-		scrollable = append(scrollable, renderTimestampContentLine(relativeTime(d.Date), renderDetailContent(d), innerWidth)...)
+		scrollable = append(scrollable, renderTimestampContentLine(relativeTime(d.Date), renderDetailContent(d), tsColWidth, innerWidth)...)
 	}
 
 	if len(item.Commits) > 0 {
@@ -752,10 +939,33 @@ func (m Model) renderDetail(width, height, scroll int) string {
 			}
 			msg := strings.SplitN(c.Message, "\n", 2)[0]
 			commitContent := styleYellow.Render(sha) + "  " + usernameTag(c.AuthorLogin) + msg
-			scrollable = append(scrollable, renderTimestampContentLine(relativeTime(c.CommitterDate), commitContent, innerWidth)...)
+			scrollable = append(scrollable, renderTimestampContentLine(relativeTime(c.CommitterDate), commitContent, tsColWidth, innerWidth)...)
 		}
 	}
 	scrollable = append(scrollable, "")
+
+	// In vertical layout the whole panel scrolls together (no sticky header),
+	// since the shorter panel makes a pinned header eat too much of the
+	// visible area; in horizontal layout the header (URL/title/summary) stays
+	// pinned and only the Comments/Commits below it scroll.
+	if m.layout == layoutVertical {
+		full := append(append([]string{}, header...), scrollable...)
+		maxScroll := len(full) - maxInterior
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if scroll > maxScroll {
+			scroll = maxScroll
+		}
+		if scroll < 0 {
+			scroll = 0
+		}
+		end := scroll + maxInterior
+		if end > len(full) {
+			end = len(full)
+		}
+		return renderDetailBox(item.Number, width, innerWidth, maxInterior, full[scroll:end])
+	}
 
 	available := maxInterior - len(header)
 	if available < 0 {
@@ -870,36 +1080,50 @@ const summaryGap = 2
 // stacked vertically instead, since squeezing both into very narrow columns
 // would make each unreadable.
 func (m Model) renderSummaryRow(item Item, innerWidth int) []string {
-	if len(item.Reviewers) == 0 {
-		return renderPRDetailsBlock(item, innerWidth)
-	}
+	// A NEW PR's per-PR data is fetched lazily (see ensureNewDetail); until
+	// that lands its comment/participant counts (from search metadata) and its
+	// reviews aren't trustworthy, so treat it as "not ready" and show loading
+	// placeholders rather than stale/absent values.
+	ready := item.Section != SectionNew || m.newDetailLoaded[item.Key]
 
 	colWidth := (innerWidth - summaryGap) / 2
 	if colWidth < 20 {
 		// Too narrow for side-by-side; stack instead.
 		var stacked []string
-		stacked = append(stacked, renderPRDetailsBlock(item, innerWidth)...)
+		stacked = append(stacked, renderPRDetailsBlock(item, innerWidth, ready)...)
 		stacked = append(stacked, "")
-		stacked = append(stacked, styleBold.Render(truncateRunes("Review Status", innerWidth)))
-		for _, ev := range item.Reviewers {
-			stacked = append(stacked, renderReviewStatusLine(ev, innerWidth))
-		}
+		stacked = append(stacked, m.reviewStatusLines(item, ready, innerWidth)...)
 		return stacked
 	}
 
-	prDetails := renderPRDetailsBlock(item, colWidth)
-
-	var reviewStatus []string
-	reviewStatus = append(reviewStatus, styleBold.Render(truncateRunes("Review Status", colWidth)))
-	for _, ev := range item.Reviewers {
-		reviewStatus = append(reviewStatus, renderReviewStatusLine(ev, colWidth))
-	}
+	prDetails := renderPRDetailsBlock(item, colWidth, ready)
+	reviewStatus := m.reviewStatusLines(item, ready, colWidth)
 
 	left := lipgloss.NewStyle().Width(colWidth).Render(strings.Join(prDetails, "\n"))
 	gutter := strings.Repeat(" ", summaryGap)
 	right := lipgloss.NewStyle().Width(colWidth).Render(strings.Join(reviewStatus, "\n"))
 	combined := lipgloss.JoinHorizontal(lipgloss.Top, left, gutter, right)
 	return strings.Split(combined, "\n")
+}
+
+// reviewStatusLines renders the "Review Status" section, which is always shown:
+// the formal review timeline when the PR has reviews, a grayed-out "No reviews
+// yet" when it has none, or "Loading…" for a NEW PR whose data hasn't been
+// fetched yet (so an empty section doesn't misleadingly read as "no reviews"
+// before we actually know).
+func (m Model) reviewStatusLines(item Item, ready bool, width int) []string {
+	lines := []string{styleBold.Render(truncateRunes("Review Status", width))}
+	switch {
+	case !ready:
+		lines = append(lines, styleGray.Render(truncateRunes("Loading…", width)))
+	case len(item.Reviewers) == 0:
+		lines = append(lines, styleGray.Render(truncateRunes("No reviews yet", width)))
+	default:
+		for _, ev := range item.Reviewers {
+			lines = append(lines, renderReviewStatusLine(ev, width)...)
+		}
+	}
+	return lines
 }
 
 // renderPRDetailsBlock renders the compact "PR Details" summary: when the
@@ -909,12 +1133,21 @@ func (m Model) renderSummaryRow(item Item, innerWidth int) []string {
 // computed, ranked participant list (see participantsOrdered in github.go),
 // so they reflect the whole PR regardless of what this panel actually
 // fetched/displays elsewhere.
-func renderPRDetailsBlock(item Item, width int) []string {
+func renderPRDetailsBlock(item Item, width int, ready bool) []string {
 	openedLine := usernameColored(item.Author) + " opened " + relativeTime(item.CreatedAt)
 	filesLine := fmt.Sprintf("%d files changed  ", item.ChangedFiles) +
 		styleApproved.Render(fmt.Sprintf("+%d", item.Additions)) + "/" +
 		styleChangesRequested.Render(fmt.Sprintf("-%d", item.Deletions))
-	commitsCommentsLine := truncateRunes(fmt.Sprintf("%d commits · %d comments", item.TotalCommits, item.TotalComments), width)
+
+	// The commit count and diff size come from GitHub's aggregate fields and
+	// are accurate even for a not-yet-loaded NEW PR; the comment count and
+	// participant list are not, so they show a "…" placeholder until the
+	// per-PR data lands (see renderSummaryRow's `ready`).
+	comments := "… comments"
+	if ready {
+		comments = fmt.Sprintf("%d comments", item.TotalComments)
+	}
+	commitsCommentsLine := truncateRunes(fmt.Sprintf("%d commits · %s", item.TotalCommits, comments), width)
 
 	lines := []string{
 		styleBold.Render(truncateRunes("PR Details", width)),
@@ -922,7 +1155,10 @@ func renderPRDetailsBlock(item Item, width int) []string {
 		filesLine,
 		commitsCommentsLine,
 	}
-	return append(lines, renderParticipantsLines(item, width)...)
+	if ready {
+		return append(lines, renderParticipantsLines(item, width)...)
+	}
+	return append(lines, styleDim.Render(truncateRunes("… participants", width)))
 }
 
 // renderParticipantsLines renders "N participants: name, name, ... (+N
@@ -969,9 +1205,15 @@ func renderParticipantsLines(item Item, width int) []string {
 		shown = append(shown, usernameColored(login))
 	}
 
-	prefix := fmt.Sprintf("%d participants: ", item.ParticipantCount)
+	// Nothing left to name once the author (and any reviewers) are removed —
+	// fall back to the plain count with no colon/empty list line.
+	if len(shown) == 0 && excluded == 0 {
+		return []string{truncateRunes(fmt.Sprintf("%d participants", item.ParticipantCount), width)}
+	}
+
+	label := fmt.Sprintf("%d participants:", item.ParticipantCount)
 	if excluded == 0 {
-		return wrapWithHangingIndent(prefix, strings.Join(shown, ", "), width)
+		return wrapBelowLabel(label, strings.Join(shown, ", "), width, participantIndent)
 	}
 	unit := "reviewers"
 	if excluded == 1 {
@@ -982,10 +1224,10 @@ func renderParticipantsLines(item Item, width int) []string {
 		// the "+" (there's nothing being added to), e.g. "4 participants:
 		// (3 reviewers)" rather than "4 participants: (+3 reviewers)".
 		note := styleGray.Render(fmt.Sprintf("(%d %s)", excluded, unit))
-		return wrapWithHangingIndent(prefix, note, width)
+		return wrapBelowLabel(label, note, width, participantIndent)
 	}
 	note := styleGray.Render(fmt.Sprintf("(+%d %s)", excluded, unit))
-	return wrapWithHangingIndent(prefix, strings.Join(shown, ", ")+" "+note, width)
+	return wrapBelowLabel(label, strings.Join(shown, ", ")+" "+note, width, participantIndent)
 }
 
 // wrapWithHangingIndent word-wraps content to fit within width (accounting
@@ -993,6 +1235,29 @@ func renderParticipantsLines(item Item, width int) []string {
 // lines to align under where content starts on the first line — instead of
 // letting them restart at the row's left edge, matching the "hanging
 // indent" pattern renderTimestampContentLine uses for the Comments section.
+// participantIndent is how far the participant name list is indented on the
+// line(s) below the "N participants:" label.
+const participantIndent = 2
+
+// wrapBelowLabel renders label on its own line, then word-wraps content onto
+// the following line(s), each indented by indent spaces. Used for the
+// participant list so the names always start on the line below the count
+// (indented) rather than trailing the label — reads consistently at every
+// width and never wraps the first name up awkwardly against the label.
+func wrapBelowLabel(label, content string, width, indent int) []string {
+	lines := []string{truncateRunes(label, width)}
+	contentWidth := width - indent
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	wrapped := lipgloss.NewStyle().Width(contentWidth).Render(content)
+	pad := strings.Repeat(" ", indent)
+	for _, l := range strings.Split(wrapped, "\n") {
+		lines = append(lines, pad+l)
+	}
+	return lines
+}
+
 func wrapWithHangingIndent(prefix, content string, width int) []string {
 	indent := lipgloss.Width(prefix)
 	contentWidth := width - indent
@@ -1040,7 +1305,7 @@ func reviewEventGlyph(state ReviewState) string {
 	return "✗"
 }
 
-func renderReviewStatusLine(ev ReviewEvent, innerWidth int) string {
+func renderReviewStatusLine(ev ReviewEvent, innerWidth int) []string {
 	var symbol, usernameRendered string
 	switch {
 	case ev.Superseded:
@@ -1058,12 +1323,21 @@ func renderReviewStatusLine(ev ReviewEvent, innerWidth int) string {
 	}
 	left := detailRowIndent + symbol + " " + usernameRendered
 
-	ts := styleGray.Render(padLeft(relativeTime(ev.Date), timestampColWidth))
+	// Try to keep the "X ago" timestamp right-aligned on the same row.
 	gap := innerWidth - lipgloss.Width(left) - timestampColWidth
-	if gap < 1 {
-		gap = 1
+	if gap >= 1 {
+		ts := styleGray.Render(padLeft(relativeTime(ev.Date), timestampColWidth))
+		return []string{left + strings.Repeat(" ", gap) + ts}
 	}
-	return left + strings.Repeat(" ", gap) + ts
+
+	// Not enough room — drop the whole "X ago" onto its own line rather than
+	// splitting it, indented to align under the username (just past the ✓/✗
+	// glyph and its trailing space).
+	indent := lipgloss.Width(detailRowIndent) + 2 // glyph (1) + space (1)
+	return []string{
+		left,
+		strings.Repeat(" ", indent) + styleGray.Render(relativeTime(ev.Date)),
+	}
 }
 
 // renderTimestampContentLine renders one Comments/Commits row as an
@@ -1072,8 +1346,14 @@ func renderReviewStatusLine(ev ReviewEvent, innerWidth int) string {
 // it wraps onto additional lines, each re-indented to start at the content
 // column's position (not restarting at the row's left edge). boxInnerWidth
 // is the full available width inside the detail box (indent included).
-func renderTimestampContentLine(ts, content string, boxInnerWidth int) []string {
-	contentWidth := boxInnerWidth - len(detailRowIndent) - timestampColWidth - detailColumnGap
+func renderTimestampContentLine(ts, content string, tsColWidth, boxInnerWidth int) []string {
+	// The timestamp column is padded to tsColWidth — the width of the longest
+	// timestamp in this section (see renderDetail) — so every row's content
+	// starts at the same column (alignment is the priority), with just
+	// detailColumnGap space(s) after the longest timestamp rather than a wide
+	// fixed gap. Continuation lines hang-indent to that same content start.
+	indent := lipgloss.Width(detailRowIndent) + tsColWidth + detailColumnGap
+	contentWidth := boxInnerWidth - indent
 	if contentWidth < 1 {
 		contentWidth = 1
 	}
@@ -1081,16 +1361,35 @@ func renderTimestampContentLine(ts, content string, boxInnerWidth int) []string 
 	wrapped := lipgloss.NewStyle().Width(contentWidth).Render(content)
 	rawLines := strings.Split(wrapped, "\n")
 
-	continuationIndent := detailRowIndent + strings.Repeat(" ", timestampColWidth+detailColumnGap)
+	continuationIndent := strings.Repeat(" ", indent)
 	lines := make([]string, len(rawLines))
 	for i, l := range rawLines {
 		if i == 0 {
-			lines[i] = detailRowIndent + styleGray.Render(padRight(ts, timestampColWidth)) + strings.Repeat(" ", detailColumnGap) + l
+			lines[i] = detailRowIndent + styleGray.Render(padRight(ts, tsColWidth)) + strings.Repeat(" ", detailColumnGap) + l
 			continue
 		}
 		lines[i] = continuationIndent + l
 	}
 	return lines
+}
+
+// maxTimestampWidth returns the display width of the widest "X ago" timestamp
+// across the given comment and commit entries — used as the shared timestamp
+// column width so the Comments and Commits sections align to the same content
+// column while keeping the gap as tight as the data allows.
+func maxTimestampWidth(comments []DetailLine, commits []Commit) int {
+	w := 0
+	for _, d := range comments {
+		if tw := lipgloss.Width(relativeTime(d.Date)); tw > w {
+			w = tw
+		}
+	}
+	for _, c := range commits {
+		if tw := lipgloss.Width(relativeTime(c.CommitterDate)); tw > w {
+			w = tw
+		}
+	}
+	return w
 }
 
 // relativeTime formats t as a short "X ago" string (e.g. "5 minutes ago",
@@ -1205,21 +1504,44 @@ func usernameTag(login string) string {
 	return usernameColored(login) + " "
 }
 
-// mentionPattern matches "@username"-style mentions in free-form comment
-// text. The character class is broader than GitHub's own username rules
-// (letters/digits/single hyphens) because some orgs' SSO-provisioned logins
-// include underscores (e.g. "jsmith_example").
-var mentionPattern = regexp.MustCompile(`@[A-Za-z0-9_-]+`)
+// commentMarkupPattern matches, in one left-to-right pass, the inline markup
+// worth coloring in free-form comment text: fenced (triple-backtick) or inline
+// (single-backtick) code spans, markdown links "[text](url)", bare "http(s)://"
+// URLs, file paths ("dir/.../name.ext" — at least one slash and an extension),
+// and "@username" mentions. Matching them together in a single alternation
+// (rather than chaining separate passes) means already-styled spans aren't
+// re-scanned — so a URL or path inside a code span stays plain code, and the
+// path inside a URL/markdown link isn't re-colored as a filename, since the
+// earlier alternative already consumed it. The mention character class is
+// broader than GitHub's own username rules (letters/digits/single hyphens)
+// because some orgs' SSO-provisioned logins include underscores (e.g.
+// "jsmith_example"). (?s) lets a fenced block span multiple lines.
+var commentMarkupPattern = regexp.MustCompile("(?s)```.*?```|`[^`]*`|\\[[^\\]]*\\]\\([^)]*\\)|https?://[^\\s<>()\\[\\]\"']+|(?:[\\w.-]+/)+[\\w.-]+\\.[A-Za-z0-9]+|@[A-Za-z0-9_-]+")
 
-// highlightMentions colors every "@username" mention in s with that login's
-// same deterministic color from usernameColor — so a mention reads with the
-// same color as that person's tag anywhere else in the TUI (reviewer list,
-// "opened by" line, etc), with no separate lookup against a known-
-// participant list needed.
-func highlightMentions(s string) string {
-	return mentionPattern.ReplaceAllStringFunc(s, func(m string) string {
-		login := strings.TrimPrefix(m, "@")
-		return lipgloss.NewStyle().Foreground(usernameColor(displayLogin(login))).Render("@" + truncateLogin(login))
+// highlightCommentMarkup colors code spans orange, markdown links and bare
+// URLs blue, file paths yellow, and "@username" mentions in that login's
+// deterministic color (matching how the name reads everywhere else in the
+// TUI). Anything not matched is left as-is.
+func highlightCommentMarkup(s string) string {
+	return commentMarkupPattern.ReplaceAllStringFunc(s, func(m string) string {
+		switch {
+		case m[0] == '`':
+			return styleCode.Render(m)
+		case m[0] == '[':
+			return styleLink.Render(m)
+		case m[0] == '@':
+			login := strings.TrimPrefix(m, "@")
+			return lipgloss.NewStyle().Foreground(usernameColor(displayLogin(login))).Render("@" + truncateLogin(login))
+		case strings.Contains(m, "://"):
+			// A bare URL — peel any trailing sentence punctuation back out so it
+			// isn't colored as part of the link (e.g. "see https://x.com." —
+			// the period stays plain). Closing brackets/parens are already
+			// excluded by the pattern's character class.
+			url := strings.TrimRight(m, ".,;:!?")
+			return styleLink.Render(url) + m[len(url):]
+		default: // file path (dir/.../name.ext)
+			return styleYellow.Render(m)
+		}
 	})
 }
 
@@ -1247,7 +1569,7 @@ func renderDetailContent(d DetailLine) string {
 		b.WriteString(login)
 		b.WriteString(": ")
 	}
-	b.WriteString(highlightMentions(sanitizeDetailText(d.Text)))
+	b.WriteString(highlightCommentMarkup(sanitizeDetailText(d.Text)))
 
 	return b.String()
 }
@@ -1322,14 +1644,12 @@ func reviewStateLabel(state ReviewState) string {
 // back to a plain leftMargin-indented (effectively left-aligned) line if the
 // terminal is too narrow to fit the full right-aligned form.
 func renderFooter(width int) string {
+	// Only the essentials live in the footer now; the full keymap is in the
+	// floating "?" help overlay (see renderHelpOverlay).
 	hints := []struct{ label, key string }{
-		{"Move", "↑↓"},
-		{"Tab", "←→"},
 		{"Toggle Done", "Enter"},
 		{"Toggle Ignore", "i"},
-		{"Scroll Detail", "^u/^d"},
-		{"Copy Link", "o"},
-		{"Refresh", "r"},
+		{"Help", "?"},
 		{"Quit", "q"},
 	}
 

@@ -1,6 +1,35 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestCommentMarkupPattern(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"file path", "see app/models/foo.rb please", []string{"app/models/foo.rb"}},
+		{"path trailing period", "edit path/to/file.js.", []string{"path/to/file.js"}},
+		{"url wins over path", "https://example.com/a/b.go here", []string{"https://example.com/a/b.go"}},
+		{"markdown link", "[f39](https://x.com/c/d) ok", []string{"[f39](https://x.com/c/d)"}},
+		{"inline code", "call `foo()` now", []string{"`foo()`"}},
+		{"mention", "cc @jsmith_example thanks", []string{"@jsmith_example"}},
+		{"version string not a path", "bump 1.2023.master.a40d125", nil},
+		{"bare domain not a path", "see example.com for info", nil},
+		{"no extension not a path", "in the and/or case", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := commentMarkupPattern.FindAllString(c.in, -1)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("FindAllString(%q) = %#v, want %#v", c.in, got, c.want)
+			}
+		})
+	}
+}
 
 func TestTruncateLogin_LeavesShortLoginsUntouched(t *testing.T) {
 	if got := truncateLogin("jsmith_example"); got != "jsmith_example" {

@@ -1,12 +1,19 @@
 package main
 
 import (
+	"context"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// newDetailMsg delivers the result of a lazy per-PR fetch for a NEW item (see
+// Model.ensureNewDetail / FetchNewDetail).
+type newDetailMsg struct {
+	detail NewDetail
+}
 
 // copyResultMsg is emitted when a Copy() call (triggered by the "o" key)
 // completes.
@@ -43,6 +50,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Entry heights (bullet wrapping) and the list viewport both depend on
+		// the terminal size, so re-seat every tab's scroll window.
+		for _, tab := range [4]int{tabOutstanding, tabNew, tabDone, tabIgnored} {
+			m.clampListScroll(tab)
+		}
 		return m, nil
 
 	case spinner.TickMsg:
@@ -81,7 +93,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		return m, fetchAllCmd(msg.repo, msg.user)
+		// If the cached view opened on a NEW PR, start loading its detail now.
+		return m, tea.Batch(m.ensureNewDetail(), fetchAllCmd(msg.repo, msg.user))
 
 	case fetchResultMsg:
 		m.loading = false
@@ -101,10 +114,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// would be pointing at now-stale data, so drop it.
 		m.transition = nil
 		m.transitionEpoch++
+		// A refresh rebuilds NEW items from scratch (no detail), so any lazily
+		// fetched detail is gone — clear the tracking so it re-fetches on the
+		// next select.
+		m.newDetailFetching = nil
+		m.newDetailLoaded = nil
 		m.classify(msg.items)
 		m.hasData = true
 		m.detailScroll = 0
-		return m, nil
+		return m, m.ensureNewDetail()
+
+	case newDetailMsg:
+		return m.applyNewDetail(msg.detail), nil
 
 	case copyResultMsg:
 		m.statusEpoch++
@@ -136,13 +157,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, transitionTickCmd(m.transition.epoch)
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		tm, cmd := m.handleKey(msg)
+		return withNewDetailFetch(tm, cmd)
 
 	case tea.MouseMsg:
-		return m.handleMouse(msg)
+		tm, cmd := m.handleMouse(msg)
+		return withNewDetailFetch(tm, cmd)
 	}
 
 	return m, nil
+}
+
+// withNewDetailFetch appends a lazy NEW-detail fetch to cmd if the model's
+// now-selected item is a NEW PR that needs one — so navigating onto a NEW PR
+// (by key or mouse) kicks off loading its comments/reviews/commits. It's a
+// no-op for any other selection.
+func withNewDetailFetch(tm tea.Model, cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	m, ok := tm.(Model)
+	if !ok {
+		return tm, cmd
+	}
+	if fetch := m.ensureNewDetail(); fetch != nil {
+		return m, tea.Batch(cmd, fetch)
+	}
+	return m, cmd
 }
 
 // handleMouse dispatches a mouse event: the wheel always scrolls the detail
@@ -155,7 +193,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
-		if m.overListColumn(msg.X) {
+		if m.overListPanel(msg.X, msg.Y) {
 			m.moveCursor(-1)
 			m.detailScroll = 0
 			return m, nil
@@ -167,7 +205,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseButtonWheelDown:
-		if m.overListColumn(msg.X) {
+		if m.overListPanel(msg.X, msg.Y) {
 			m.moveCursor(1)
 			m.detailScroll = 0
 			return m, nil
@@ -202,8 +240,29 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // data is showing (m.hasData), navigation/toggle/copy keep working normally
 // even while a background refresh is running.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Ctrl+C is a hard quit that always works, even with the help overlay open.
+	if msg.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+
+	// The help overlay (see keys.Help / Model.showHelp) is modal: while it's
+	// open, "?", "q", or Esc close it and every other key is swallowed — so "q"
+	// closes the overlay rather than quitting the app. Handled before the Quit
+	// binding below for exactly that reason.
+	if m.showHelp {
+		if key.Matches(msg, m.keys.Help) || msg.String() == "q" || msg.String() == "esc" {
+			m.showHelp = false
+		}
+		return m, nil
+	}
+
 	if key.Matches(msg, m.keys.Quit) {
 		return m, tea.Quit
+	}
+
+	if key.Matches(msg, m.keys.Help) {
+		m.showHelp = true
+		return m, nil
 	}
 
 	if key.Matches(msg, m.keys.Refresh) {
@@ -265,6 +324,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case key.Matches(msg, m.keys.Layout):
+		if m.layout == layoutHorizontal {
+			m.layout = layoutVertical
+		} else {
+			m.layout = layoutHorizontal
+		}
+		// The list viewport height/width changes with the layout, so re-seat
+		// the scroll window around the cursor and reset the detail scroll.
+		m.clampListScroll(m.activeTab)
+		m.detailScroll = 0
+		return m, nil
+
 	case key.Matches(msg, m.keys.Copy):
 		return m.copySelected()
 	}
@@ -291,33 +362,48 @@ func (m *Model) moveCursor(delta int) {
 	m.clampListScroll(m.activeTab)
 }
 
-// clampListScroll adjusts tab's scroll offset by the minimum amount needed
-// to keep its cursor within the visible window — the cursor can reach the
-// very first/last visible row before the window actually moves, rather than
-// always being kept centered.
+// clampListScroll adjusts tab's scroll offset (the index of the first visible
+// entry) by the minimum amount needed to keep its cursor's entry fully within
+// the visible window. Entries are variable-height, so it measures their actual
+// row counts (at the current layout's list width/height) rather than assuming
+// a fixed per-entry height: the window is pushed down only far enough that the
+// cursor's entry fits within the available rows.
 func (m *Model) clampListScroll(tab int) {
-	n := len(m.items[tab])
-	itemsPerPage := m.listItemsPerPage()
-	cursor := m.cursors[tab]
-	scroll := m.listScroll[tab]
+	items := m.items[tab]
+	n := len(items)
+	if n == 0 {
+		m.listScroll[tab] = 0
+		return
+	}
 
-	if cursor < scroll {
-		scroll = cursor
+	width := m.listContentWidth()
+	counts := m.entryLineCounts(tab, width)
+	avail := m.listViewportHeight() - 1 // one row reserved for the ↑ indicator
+	if avail < 1 {
+		avail = 1
 	}
-	if cursor >= scroll+itemsPerPage {
-		scroll = cursor - itemsPerPage + 1
+
+	cursor := m.cursors[tab]
+	start := m.listScroll[tab]
+	if start < 0 {
+		start = 0
 	}
-	maxScroll := n - itemsPerPage
-	if maxScroll < 0 {
-		maxScroll = 0
+	if start > cursor {
+		start = cursor
 	}
-	if scroll > maxScroll {
-		scroll = maxScroll
+	// Push the window down until the cursor's entry fits within avail rows
+	// measured from the first visible entry.
+	for start < cursor {
+		used := 0
+		for i := start; i <= cursor; i++ {
+			used += counts[i]
+		}
+		if used <= avail {
+			break
+		}
+		start++
 	}
-	if scroll < 0 {
-		scroll = 0
-	}
-	m.listScroll[tab] = scroll
+	m.listScroll[tab] = start
 }
 
 // selectedItem returns the item under the cursor in the active tab, if any.
@@ -498,6 +584,62 @@ func (m Model) copySelected() (tea.Model, tea.Cmd) {
 		status, err := Copy(url)
 		return copyResultMsg{status: status, err: err}
 	}
+}
+
+// ensureNewDetail returns a command that lazily fetches the selected PR's
+// per-PR data when it's a NEW item that hasn't been (and isn't already being)
+// fetched. It marks the fetch in-flight so duplicates aren't launched, and
+// returns nil when there's nothing to do (selection isn't a NEW PR, it's
+// already loaded/loading, or the repo isn't resolved yet).
+func (m *Model) ensureNewDetail() tea.Cmd {
+	item, ok := m.selectedItem()
+	if !ok || m.repo == "" || item.Section != SectionNew {
+		return nil
+	}
+	if m.newDetailLoaded[item.Key] || m.newDetailFetching[item.Key] {
+		return nil
+	}
+	if m.newDetailFetching == nil {
+		m.newDetailFetching = make(map[string]bool)
+	}
+	m.newDetailFetching[item.Key] = true
+
+	repo, key, author, number := m.repo, item.Key, item.Author, item.Number
+	return func() tea.Msg {
+		return newDetailMsg{detail: FetchNewDetail(context.Background(), repo, key, author, number)}
+	}
+}
+
+// applyNewDetail merges a completed lazy NEW-detail fetch back into the item it
+// was fetched for and marks it loaded so it isn't refetched. A fetch error is
+// left unmarked so revisiting the PR retries. Adding review data can change the
+// item's list-entry height (review icons in the bullet), so the scroll window
+// is re-clamped.
+func (m Model) applyNewDetail(d NewDetail) Model {
+	delete(m.newDetailFetching, d.Key)
+	if d.Err != nil {
+		return m // leave it retryable
+	}
+	if m.newDetailLoaded == nil {
+		m.newDetailLoaded = make(map[string]bool)
+	}
+	m.newDetailLoaded[d.Key] = true
+
+	for tab := range m.items {
+		for i := range m.items[tab] {
+			if m.items[tab][i].Key != d.Key {
+				continue
+			}
+			m.items[tab][i].Detail = d.Detail
+			m.items[tab][i].Commits = d.Commits
+			m.items[tab][i].Reviewers = d.Reviewers
+			m.items[tab][i].ParticipantLogins = d.ParticipantLogins
+			m.items[tab][i].ParticipantCount = d.ParticipantCount
+			m.items[tab][i].TotalComments = d.TotalComments
+		}
+	}
+	m.clampListScroll(m.activeTab)
+	return m
 }
 
 // classify splits items into the outstanding/new/done/ignored tabs based on

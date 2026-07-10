@@ -1109,6 +1109,59 @@ func classifyNew(repo string, node searchNode) Item {
 	}
 }
 
+// NewDetail carries the per-PR data lazily fetched for a NEW-tab PR the first
+// time the user selects it (see FetchNewDetail). These are the fields the
+// detail pane needs to show a NEW PR's comments/reviews/commits — the same
+// data shown for PRs in the other tabs — which classifyNew intentionally left
+// empty to avoid a REST round-trip for every open PR up front.
+type NewDetail struct {
+	Key               string
+	Detail            []DetailLine
+	Commits           []Commit
+	Reviewers         []ReviewEvent
+	ParticipantLogins []string
+	ParticipantCount  int
+	TotalComments     int
+	Err               error
+}
+
+// FetchNewDetail fetches a single NEW PR's comments, reviews, and commits and
+// assembles them the same way classifyReviewing does (full comment/review
+// thread, all commits oldest-first, formal review timeline, ranked participant
+// list). It's run on demand when the user first navigates to a NEW PR, so the
+// bulk refresh stays cheap. Key/author identify the PR for merging the result
+// back into the right Item.
+func FetchNewDetail(ctx context.Context, repo, key, author string, number int) NewDetail {
+	ci := fetchCodeownersInfo(ctx, repo)
+
+	comments, inline, reviews, rawCommits, err := fetchPRData(ctx, repo, number)
+	if err != nil {
+		return NewDetail{Key: key, Err: err}
+	}
+
+	activity := buildActivity(comments, inline, reviews)
+	commits := toCommits(rawCommits)
+	// No user baseline for a NEW PR, so show the whole history: all commits,
+	// oldest first (matching how the detail pane renders the Commits section).
+	sort.Slice(commits, func(i, j int) bool { return commits[i].CommitterDate.Before(commits[j].CommitterDate) })
+
+	allActivity := make([]Activity, len(activity))
+	copy(allActivity, activity)
+	sort.Slice(allActivity, func(i, j int) bool { return allActivity[i].Date.Before(allActivity[j].Date) })
+
+	participants := participantsOrdered(author, false, activity, commits)
+
+	return NewDetail{
+		Key:               key,
+		Detail:            filterActivityToDetail(allActivity, true),
+		Commits:           commits,
+		Reviewers:         reviewEvents(activity, ci),
+		ParticipantLogins: participants,
+		ParticipantCount:  len(participants),
+		TotalComments:     meaningfulCommentCount(activity),
+	}
+}
+
 // erroredItem builds a placeholder Item for a PR whose per-PR data couldn't be
 // fetched, from the metadata already in hand. It carries FetchError so the TUI
 // can show the PR (in Outstanding) with the error surfaced instead of dropping

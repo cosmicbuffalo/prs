@@ -17,6 +17,7 @@ var (
 	colorOrange  = lipgloss.Color("208")
 	colorYellow  = lipgloss.Color("3")
 	colorWhite   = lipgloss.Color("15")
+	colorBlue    = lipgloss.Color("12")
 
 	styleApproved         = lipgloss.NewStyle().Foreground(colorGreen)
 	styleWeakApproved     = lipgloss.NewStyle().Foreground(colorYellow) // an approval that's valid but not from the trusted-reviewer team — yellow so it's clearly distinct from both a full (green) approval and a superseded (gray) one
@@ -26,8 +27,11 @@ var (
 
 	styleGray   = lipgloss.NewStyle().Foreground(colorGray)
 	styleOrange = lipgloss.NewStyle().Foreground(colorOrange)
+	styleCode   = lipgloss.NewStyle().Foreground(colorOrange) // `code` spans in comments
+	styleLink   = lipgloss.NewStyle().Foreground(colorBlue)   // [text](url) markdown links
 	styleYellow = lipgloss.NewStyle().Foreground(colorYellow)
 	styleBold   = lipgloss.NewStyle().Bold(true)
+	styleTitle  = lipgloss.NewStyle().Bold(true).Italic(true) // PR title in the detail panel
 	styleDim    = lipgloss.NewStyle().Faint(true)
 	styleItalic = lipgloss.NewStyle().Italic(true)
 

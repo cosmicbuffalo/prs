@@ -87,7 +87,7 @@ The **Review Status** section is always shown, with a grayed-out "No reviews yet
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` (or `k` / `j`) | Move the cursor within the current tab |
+| `↓` / `↑` (or `j` / `k`) | Move the cursor within the current tab |
 | `←` / `→` (or `h` / `l`) | Switch tabs |
 | `Enter` | Toggle the selected PR's **done** state |
 | `i` | Toggle the selected PR's **ignored** state |

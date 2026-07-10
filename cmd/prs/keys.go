@@ -18,6 +18,8 @@ type KeyMap struct {
 	Refresh    key.Binding
 	ScrollUp   key.Binding
 	ScrollDown key.Binding
+	Layout     key.Binding
+	Help       key.Binding
 	Quit       key.Binding
 }
 
@@ -69,6 +71,14 @@ func DefaultKeyMap() KeyMap {
 		ScrollUp: key.NewBinding(
 			key.WithKeys("ctrl+u"),
 			key.WithHelp("^u", "scroll detail up"),
+		),
+		Layout: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "toggle layout"),
+		),
+		Help: key.NewBinding(
+			key.WithKeys("?"),
+			key.WithHelp("?", "help"),
 		),
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
