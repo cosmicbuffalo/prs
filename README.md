@@ -1,17 +1,17 @@
 # prs
 
-A terminal UI that surfaces only the open GitHub PRs in a repo that actually need your attention right now — not every open PR.
+A terminal UI that surfaces GitHub PRs in need of your attention for whatever repo you're currently in.
 
-It watches for the two ways a PR quietly goes stale after you've looked at it:
+The two primary categories of PRs it watches out for:
 
-- You **reviewed** someone's PR, they pushed new commits, and it fell off your radar.
-- You **opened** a PR, someone commented, and nothing pulled it back to your attention.
+- PRs you **reviewed** that have more recent activity you haven't seen yet.
+- PRs you **opened** that have new activity you haven't addressed yet.
 
-`prs` finds exactly those situations, plus brand-new PRs you haven't seen yet, and lets you triage them into simple per-PR states that persist across restarts.
+`prs` categorizes open PRs on your current repo into four buckets, `Outstanding`, `New`, `Done`, and `Ignored`. Any PR matching one of the two primary scenarios above is automatically moved into the `Outstanding` tab so that you can see what's new since you last reviewed/committed first. `New` contains PRs you haven't looked at yet, and `Done` and `Ignored` are the two buckets PRs move to as you work through them. Moving a PR to `Done` will track it as completed until new activity is detected, and moving a PR to `Ignored` will get that PR out of your backlog permanently, regardless of new activity.
 
 ## Install
 
-The one-liner downloads a prebuilt binary for your platform — **no Go toolchain required** — and installs it to `~/.local/bin/prs`:
+The one-liner downloads a prebuilt binary for your platform and installs it to `~/.local/bin/prs`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cosmicbuffalo/prs/main/install.sh | sh
@@ -30,22 +30,22 @@ make uninstall   # removes it
 
 ## Usage
 
-Run it from inside a git checkout with a GitHub remote:
+Run it from inside a git repo with a GitHub remote. The TUI will automatically detect the current github user based on `gh` cli auth.
 
 ```bash
 prs
 ```
 
-Or point it at any repo/user explicitly (works from anywhere):
+Or point it at any repo or user context explicitly (works from anywhere, for any github username):
 
 ```bash
-prs --repo owner/name --user someone
+prs --repo owner/name --as_user someone
 ```
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--repo` | detected via `gh repo view` in the current directory | `owner/repo` to check |
-| `--user` | detected via `gh api user` | GitHub login whose activity to check against |
+| `--as_user` | detected via `gh api user` | GitHub login to view PRs from the perspective of |
 
 `prs` has no credentials of its own — it shells out to the [GitHub CLI](https://cli.github.com/) (`gh`) for every piece of data. Run `gh auth status` first to make sure you're authenticated.
 
@@ -63,7 +63,7 @@ PRs are sorted into four tabs, switched with `←`/`→`. Only open, non-draft P
 ### How a PR is classified
 
 - **Reviewing** — a PR authored by someone else that you've commented on or reviewed, where new activity has landed since your last activity (a commit by someone other than you, or a comment/review from someone else). Lands in **Outstanding**.
-- **Authored** — your own PR where a comment or review from someone else landed after your last pushed commit. Lands in **Outstanding**.
+- **Authored** — your own PR where a comment, review, or commit from someone else landed after your last pushed commit. Lands in **Outstanding**.
 - **New** — an open PR you've never touched (not the author, never commented or reviewed). Lands in **New**.
 
 ### How PRs move between tabs
