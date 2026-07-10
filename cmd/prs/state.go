@@ -20,22 +20,34 @@ type storeEntry struct {
 	Ignored   bool      `json:"ignored,omitempty"`
 }
 
-// storeFile is the on-disk JSON shape.
+// storeFile is the on-disk JSON shape. Done/ignored state is scoped per
+// GitHub login (Users[<login>][<item.Key>]) so running the TUI with
+// different --as_user values keeps independent state and never overlaps.
+//
+// Entries is the legacy pre-user-scoping flat map. It's still read for
+// backward compatibility and folded into the current user's bucket on first
+// load (see newStoreAtPath); once the store is saved again it's written only
+// under Users and the legacy field disappears.
 type storeFile struct {
-	Entries map[string]storeEntry `json:"entries"`
+	Users   map[string]map[string]storeEntry `json:"users"`
+	Entries map[string]storeEntry            `json:"entries,omitempty"`
 }
 
-// Store persists which PRs the user has marked done, keyed by Item.Key, and
-// at what TriggerDate they were marked done.
+// Store persists which PRs a given user has marked done/ignored, keyed by
+// Item.Key, and at what TriggerDate they were marked done. Each Store is
+// bound to a single GitHub login (the resolved --user / current gh user) and
+// only ever reads and writes that user's slice of the file, leaving other
+// users' state untouched.
 //
 // The mutex guards against concurrent access; in practice Bubble Tea's Elm
 // architecture drives Update from a single goroutine, so this is likely
 // unnecessary, but it's cheap insurance against future callers (e.g. a
 // background fetch goroutine) touching the store off the Update loop.
 type Store struct {
-	mu      sync.Mutex
-	path    string
-	entries map[string]storeEntry
+	mu    sync.Mutex
+	path  string
+	user  string
+	users map[string]map[string]storeEntry
 }
 
 // stateBaseDir returns the directory persisted state/cache files live in:
@@ -56,10 +68,10 @@ func stateBaseDir() (string, error) {
 	return filepath.Join(home, ".local", "state", "prs"), nil
 }
 
-// LoadStore loads the state file from stateBaseDir()/state.json, creating an
-// empty in-memory store (backed by that path for future saves) if the file
-// doesn't exist yet. The directory is created as needed.
-func LoadStore() (*Store, error) {
+// LoadStore loads the state file from stateBaseDir()/state.json, scoped to
+// user, creating an empty in-memory store (backed by that path for future
+// saves) if the file doesn't exist yet. The directory is created as needed.
+func LoadStore(user string) (*Store, error) {
 	dir, err := stateBaseDir()
 	if err != nil {
 		return nil, err
@@ -67,16 +79,21 @@ func LoadStore() (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
 	}
-	return newStoreAtPath(filepath.Join(dir, "state.json")), nil
+	return newStoreAtPath(filepath.Join(dir, "state.json"), user), nil
 }
 
-// newStoreAtPath builds a Store backed by path, loading existing entries from
-// disk if present. A missing or corrupt file is treated as an empty store
-// (best-effort: a bad state file shouldn't prevent the TUI from opening).
-func newStoreAtPath(path string) *Store {
+// newStoreAtPath builds a Store backed by path and scoped to user, loading
+// existing entries from disk if present. A missing or corrupt file is treated
+// as an empty store (best-effort: a bad state file shouldn't prevent the TUI
+// from opening). Any legacy flat entries (from before state was user-scoped)
+// are migrated into user's bucket — this attributes pre-upgrade state to
+// whichever login first runs after the upgrade, which is the default user in
+// normal use.
+func newStoreAtPath(path, user string) *Store {
 	s := &Store{
-		path:    path,
-		entries: map[string]storeEntry{},
+		path:  path,
+		user:  user,
+		users: map[string]map[string]storeEntry{},
 	}
 
 	data, err := os.ReadFile(path)
@@ -88,19 +105,40 @@ func newStoreAtPath(path string) *Store {
 	if err := json.Unmarshal(data, &onDisk); err != nil {
 		return s
 	}
-	if onDisk.Entries != nil {
-		s.entries = onDisk.Entries
+	if onDisk.Users != nil {
+		s.users = onDisk.Users
+	}
+	// Migrate legacy flat entries into this user's bucket without clobbering
+	// anything already there under Users.
+	if len(onDisk.Entries) > 0 {
+		mine := s.mineLocked()
+		for k, v := range onDisk.Entries {
+			if _, exists := mine[k]; !exists {
+				mine[k] = v
+			}
+		}
 	}
 	return s
 }
 
-// IsDone reports whether item is currently "done": there's a stored done_until
-// timestamp for item.Key that is >= item.TriggerDate.
+// mineLocked returns the current user's entry map, creating it if needed.
+// Callers must hold s.mu (or be in single-threaded setup like newStoreAtPath).
+func (s *Store) mineLocked() map[string]storeEntry {
+	m := s.users[s.user]
+	if m == nil {
+		m = map[string]storeEntry{}
+		s.users[s.user] = m
+	}
+	return m
+}
+
+// IsDone reports whether item is currently "done" for this user: there's a
+// stored done_until timestamp for item.Key that is >= item.TriggerDate.
 func (s *Store) IsDone(item Item) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.entries[item.Key]
+	entry, ok := s.users[s.user][item.Key]
 	if !ok {
 		return false
 	}
@@ -112,9 +150,10 @@ func (s *Store) IsDone(item Item) bool {
 // Any existing Ignored flag for item.Key is preserved.
 func (s *Store) MarkDone(item Item) error {
 	s.mu.Lock()
-	entry := s.entries[item.Key]
+	mine := s.mineLocked()
+	entry := mine[item.Key]
 	entry.DoneUntil = item.TriggerDate
-	s.entries[item.Key] = entry
+	mine[item.Key] = entry
 	s.mu.Unlock()
 
 	return s.save()
@@ -125,7 +164,8 @@ func (s *Store) MarkDone(item Item) error {
 // neither flag is set, to avoid the state file accumulating empty entries.
 func (s *Store) MarkUndone(item Item) error {
 	s.mu.Lock()
-	entry := s.entries[item.Key]
+	mine := s.mineLocked()
+	entry := mine[item.Key]
 	entry.DoneUntil = time.Time{}
 	s.setOrDeleteLocked(item.Key, entry)
 	s.mu.Unlock()
@@ -133,22 +173,24 @@ func (s *Store) MarkUndone(item Item) error {
 	return s.save()
 }
 
-// IsIgnored reports whether item has been explicitly marked ignored. Unlike
-// IsDone, this never resets on its own — it's cleared only by MarkUnignored.
+// IsIgnored reports whether item has been explicitly marked ignored by this
+// user. Unlike IsDone, this never resets on its own — it's cleared only by
+// MarkUnignored.
 func (s *Store) IsIgnored(item Item) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.entries[item.Key].Ignored
+	return s.users[s.user][item.Key].Ignored
 }
 
 // MarkIgnored records item as ignored and persists the store to disk. Any
 // existing DoneUntil for item.Key is preserved.
 func (s *Store) MarkIgnored(item Item) error {
 	s.mu.Lock()
-	entry := s.entries[item.Key]
+	mine := s.mineLocked()
+	entry := mine[item.Key]
 	entry.Ignored = true
-	s.entries[item.Key] = entry
+	mine[item.Key] = entry
 	s.mu.Unlock()
 
 	return s.save()
@@ -158,7 +200,8 @@ func (s *Store) MarkIgnored(item Item) error {
 // intact) and persists the store to disk.
 func (s *Store) MarkUnignored(item Item) error {
 	s.mu.Lock()
-	entry := s.entries[item.Key]
+	mine := s.mineLocked()
+	entry := mine[item.Key]
 	entry.Ignored = false
 	s.setOrDeleteLocked(item.Key, entry)
 	s.mu.Unlock()
@@ -166,25 +209,29 @@ func (s *Store) MarkUnignored(item Item) error {
 	return s.save()
 }
 
-// setOrDeleteLocked stores entry under key, or deletes the key entirely if
-// entry is now the zero value (neither done nor ignored) — callers must hold
-// s.mu. Keeps the state file from accumulating empty leftover entries.
+// setOrDeleteLocked stores entry under key in the current user's bucket, or
+// deletes the key entirely if entry is now the zero value (neither done nor
+// ignored) — callers must hold s.mu. Keeps the state file from accumulating
+// empty leftover entries.
 func (s *Store) setOrDeleteLocked(key string, entry storeEntry) {
+	mine := s.mineLocked()
 	if entry.DoneUntil.IsZero() && !entry.Ignored {
-		delete(s.entries, key)
+		delete(mine, key)
 		return
 	}
-	s.entries[key] = entry
+	mine[key] = entry
 }
 
-// Prune drops any stored entries whose key is not present in currentKeys
-// (used after each fetch to garbage-collect entries for PRs that no longer
-// qualify or have been closed/merged), then persists the store to disk.
+// Prune drops any of the current user's stored entries whose key is not
+// present in currentKeys (used after each fetch to garbage-collect entries
+// for PRs that no longer qualify or have been closed/merged), then persists
+// the store to disk. Other users' entries are left untouched.
 func (s *Store) Prune(currentKeys map[string]bool) error {
 	s.mu.Lock()
-	for key := range s.entries {
+	mine := s.mineLocked()
+	for key := range mine {
 		if !currentKeys[key] {
-			delete(s.entries, key)
+			delete(mine, key)
 		}
 	}
 	s.mu.Unlock()
@@ -194,10 +241,18 @@ func (s *Store) Prune(currentKeys map[string]bool) error {
 
 // save atomically writes the store's current entries to s.path: it writes to
 // a temp file in the same directory, then renames over the real path, so a
-// crash mid-write can't corrupt the file.
+// crash mid-write can't corrupt the file. Empty per-user buckets are dropped
+// so the file doesn't accumulate blank users.
 func (s *Store) save() error {
 	s.mu.Lock()
-	onDisk := storeFile{Entries: s.entries}
+	users := make(map[string]map[string]storeEntry, len(s.users))
+	for user, entries := range s.users {
+		if len(entries) == 0 {
+			continue
+		}
+		users[user] = entries
+	}
+	onDisk := storeFile{Users: users}
 	path := s.path
 	s.mu.Unlock()
 

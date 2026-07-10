@@ -36,3 +36,14 @@ func TestSanitizeDetailText_LeavesSingleBlankLineUntouched(t *testing.T) {
 		t.Fatalf("sanitizeDetailText = %q, want %q (a single blank line shouldn't be touched)", got, want)
 	}
 }
+
+func TestDisplayLogin_CollapsesCopilotVariants(t *testing.T) {
+	for _, login := range []string{"Copilot", "copilot-pull-request-reviewer", "copilot-pull-request-reviewer[bot]"} {
+		if got := displayLogin(login); got != "copilot" {
+			t.Errorf("displayLogin(%q) = %q, want copilot", login, got)
+		}
+	}
+	if got := displayLogin("jsmith_example"); got != "jsmith_example" {
+		t.Errorf("displayLogin left a normal login alone: got %q", got)
+	}
+}

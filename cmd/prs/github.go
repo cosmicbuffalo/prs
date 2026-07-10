@@ -240,6 +240,10 @@ type searchNode struct {
 type searchResponse struct {
 	Data struct {
 		Search struct {
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
 			Nodes []searchNode `json:"nodes"`
 		} `json:"search"`
 	} `json:"data"`
@@ -258,8 +262,12 @@ type searchResponse struct {
 // they're available uniformly for all three sections (including New, which
 // otherwise has no per-PR data beyond this search).
 const searchQueryGraphQL = `
-query($searchQuery: String!) {
-  search(query: $searchQuery, type: ISSUE, first: 100) {
+query($searchQuery: String!, $cursor: String) {
+  search(query: $searchQuery, type: ISSUE, first: 100, after: $cursor) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
     nodes {
       ... on PullRequest {
         number
@@ -488,15 +496,33 @@ func searchOpenPRs(ctx context.Context, repo, qualifier string) ([]searchNode, e
 	if qualifier != "" {
 		searchQuery += " " + qualifier
 	}
-	out, err := runGH(ctx, "api", "graphql", "-f", "query="+searchQueryGraphQL, "-f", "searchQuery="+searchQuery)
-	if err != nil {
-		return nil, err
+
+	var all []searchNode
+	cursor := ""
+	for {
+		args := []string{
+			"api", "graphql",
+			"-f", "query=" + searchQueryGraphQL,
+			"-f", "searchQuery=" + searchQuery,
+		}
+		if cursor != "" {
+			args = append(args, "-f", "cursor="+cursor)
+		}
+		out, err := runGH(ctx, args...)
+		if err != nil {
+			return nil, err
+		}
+		var resp searchResponse
+		if err := json.Unmarshal(out, &resp); err != nil {
+			return nil, fmt.Errorf("parsing search response for query %q: %w", qualifier, err)
+		}
+		all = append(all, resp.Data.Search.Nodes...)
+		if !resp.Data.Search.PageInfo.HasNextPage {
+			break
+		}
+		cursor = resp.Data.Search.PageInfo.EndCursor
 	}
-	var resp searchResponse
-	if err := json.Unmarshal(out, &resp); err != nil {
-		return nil, fmt.Errorf("parsing search response for query %q: %w", qualifier, err)
-	}
-	return resp.Data.Search.Nodes, nil
+	return all, nil
 }
 
 // fetchPRData fetches issue comments, inline review comments, reviews, and
@@ -732,13 +758,14 @@ func participantsOrdered(author string, authorIsBot bool, activity []Activity, c
 	return logins
 }
 
-// classifyReviewing determines whether a PR belongs in the "reviewing"
-// bucket for user: the user must have left activity on the PR, and there
-// must be newer activity from someone else on the PR since — either a
-// commit not authored/committed by the user, or a comment/inline
-// comment/review from someone other than the user. Returns nil if the PR
-// doesn't qualify. Caller is responsible for having already checked
-// meta.Author != user and that the PR came from the commenter search.
+// classifyReviewing builds the "reviewing" Item for a PR the user has
+// commented on or reviewed (authored by someone else). If new activity from
+// someone else has landed since the user's last activity — a commit not
+// authored/committed by them, or a comment/review from someone else — the
+// item is a normal (Outstanding) one; otherwise it's marked Quiet (lands in
+// Done). It never returns nil, so an involved PR is always shown somewhere.
+// Caller is responsible for having already checked meta.Author != user and
+// that the PR came from the commenter search.
 func classifyReviewing(repo string, meta prMeta, user string, activity []Activity, commits []Commit, ci codeownersInfo) *Item {
 	var mine []Activity
 	for _, a := range activity {
@@ -746,11 +773,14 @@ func classifyReviewing(repo string, meta prMeta, user string, activity []Activit
 			mine = append(mine, a)
 		}
 	}
-	if len(mine) == 0 {
-		return nil
-	}
 	sort.Slice(mine, func(i, j int) bool { return mine[i].Date.Before(mine[j].Date) })
-	baseline := mine[len(mine)-1].Date
+	// Baseline is the user's last activity on the PR. If the commenter search
+	// surfaced a PR we somehow see no activity from the user on, fall back to
+	// the PR's creation date so it's still classified (never dropped).
+	baseline := meta.CreatedAt
+	if len(mine) > 0 {
+		baseline = mine[len(mine)-1].Date
+	}
 
 	var newerCommits []Commit
 	for _, c := range commits {
@@ -764,10 +794,17 @@ func classifyReviewing(repo string, meta prMeta, user string, activity []Activit
 			newerActivity = append(newerActivity, a)
 		}
 	}
-	if len(newerCommits) == 0 && len(newerActivity) == 0 {
-		return nil
+	// No new activity from anyone else since the user's last look ⇒ a "quiet"
+	// PR: still returned (lands in Done via classify) rather than dropped.
+	quiet := len(newerCommits) == 0 && len(newerActivity) == 0
+	var trigger time.Time
+	var latestSummary string
+	if quiet {
+		trigger = latestActivityOrCommit(activity, commits, baseline)
+		latestSummary = "No new activity since your last review"
+	} else {
+		trigger, latestSummary = latestEventSummary(newerCommits, newerActivity)
 	}
-	trigger, latestSummary := latestEventSummary(newerCommits, newerActivity)
 	sort.Slice(newerCommits, func(i, j int) bool { return newerCommits[i].CommitterDate.Before(newerCommits[j].CommitterDate) })
 
 	badge := ReviewStateNone
@@ -799,6 +836,7 @@ func classifyReviewing(repo string, meta prMeta, user string, activity []Activit
 		Detail:            filterActivityToDetail(allActivity, true),
 		Commits:           newerCommits,
 		LatestSummary:     latestSummary,
+		Quiet:             quiet,
 		Author:            meta.Author,
 		Reviewers:         reviewEvents(activity, ci),
 		TotalCommits:      meta.TotalCommitCount,
@@ -810,6 +848,24 @@ func classifyReviewing(repo string, meta prMeta, user string, activity []Activit
 		ParticipantCount:  len(participants),
 		ParticipantLogins: participants,
 	}
+}
+
+// latestActivityOrCommit returns the most recent date across all activity and
+// commits, or fallback if there are none — used as a "quiet" PR's TriggerDate
+// so its "updated X ago" reflects the genuinely most recent thing on the PR.
+func latestActivityOrCommit(activity []Activity, commits []Commit, fallback time.Time) time.Time {
+	latest := fallback
+	for _, a := range activity {
+		if a.Date.After(latest) {
+			latest = a.Date
+		}
+	}
+	for _, c := range commits {
+		if c.CommitterDate.After(latest) {
+			latest = c.CommitterDate
+		}
+	}
+	return latest
 }
 
 // latestEventSummary picks whichever of the given (already-filtered "newer,
@@ -922,13 +978,14 @@ func truncateSummary(s string, n int) string {
 	return string(runes[:n-1]) + "…"
 }
 
-// classifyAuthored determines whether a PR belongs in the "authored" bucket
-// for user: the user must have at least one commit of their own on the PR
-// (baseline = the user's own last push), and there must be newer activity
-// from someone else since then — either a commit not authored/committed by
-// the user, or a comment/inline comment/review from someone other than the
-// user. Returns nil if the PR doesn't qualify. Caller is responsible for
-// having already checked meta.Author == user.
+// classifyAuthored builds the "authored" Item for a PR the user opened. The
+// baseline is the user's last push (or the PR's open timestamp if they have
+// no commit of their own on it). If new activity from someone else has landed
+// since — a commit not authored/committed by them, or a comment/review from
+// someone else — the item is a normal (Outstanding) one; otherwise it's
+// marked Quiet (lands in Done). It never returns nil, so an authored PR is
+// always shown somewhere. Caller is responsible for having already checked
+// meta.Author == user.
 func classifyAuthored(repo string, meta prMeta, user string, activity []Activity, commits []Commit, ci codeownersInfo) *Item {
 	var myCommits []Commit
 	for _, c := range commits {
@@ -936,14 +993,20 @@ func classifyAuthored(repo string, meta prMeta, user string, activity []Activity
 			myCommits = append(myCommits, c)
 		}
 	}
-	if len(myCommits) == 0 {
-		return nil
-	}
-	baseline := myCommits[0].CommitterDate
-	for _, c := range myCommits[1:] {
-		if c.CommitterDate.After(baseline) {
-			baseline = c.CommitterDate
+	// Baseline is the user's last push. If they authored the PR but have no
+	// commit attributed to their account on it (e.g. it's all a co-author's
+	// commits), fall back to the PR's open timestamp so it's still classified
+	// (never dropped) rather than requiring an authored commit.
+	baseline := meta.CreatedAt
+	baselineLabel := "opened"
+	if len(myCommits) > 0 {
+		baseline = myCommits[0].CommitterDate
+		for _, c := range myCommits[1:] {
+			if c.CommitterDate.After(baseline) {
+				baseline = c.CommitterDate
+			}
 		}
+		baselineLabel = "your last push"
 	}
 
 	var newerCommits []Commit
@@ -958,10 +1021,21 @@ func classifyAuthored(repo string, meta prMeta, user string, activity []Activity
 			newer = append(newer, a)
 		}
 	}
-	if len(newerCommits) == 0 && len(newer) == 0 {
-		return nil
+	// No new activity from anyone else since the user's baseline ⇒ a "quiet"
+	// PR: still returned (lands in Done via classify) rather than dropped.
+	quiet := len(newerCommits) == 0 && len(newer) == 0
+	var trigger time.Time
+	var latestSummary string
+	if quiet {
+		trigger = latestActivityOrCommit(activity, commits, baseline)
+		if len(myCommits) > 0 {
+			latestSummary = "No new activity since your last push"
+		} else {
+			latestSummary = "No new activity since you opened it"
+		}
+	} else {
+		trigger, latestSummary = latestEventSummary(newerCommits, newer)
 	}
-	trigger, latestSummary := latestEventSummary(newerCommits, newer)
 	sort.Slice(newerCommits, func(i, j int) bool { return newerCommits[i].CommitterDate.Before(newerCommits[j].CommitterDate) })
 	sort.Slice(newer, func(i, j int) bool { return newer[i].Date.Before(newer[j].Date) })
 
@@ -975,10 +1049,11 @@ func classifyAuthored(repo string, meta prMeta, user string, activity []Activity
 		Section:           SectionAuthored,
 		TriggerDate:       trigger,
 		Baseline:          baseline,
-		BaselineLabel:     "your last push",
+		BaselineLabel:     baselineLabel,
 		Detail:            filterActivityToDetail(newer, true),
 		Commits:           newerCommits,
 		LatestSummary:     latestSummary,
+		Quiet:             quiet,
 		Author:            meta.Author,
 		Reviewers:         reviewEvents(activity, ci),
 		TotalCommits:      meta.TotalCommitCount,
@@ -1034,11 +1109,34 @@ func classifyNew(repo string, node searchNode) Item {
 	}
 }
 
-// FetchAll fetches and classifies all open, non-draft PRs needing attention
-// for `user` in `repo`. Returns items sorted by TriggerDate ascending
-// (oldest activity first, so the longest-waiting PRs surface at the top).
-// Individual per-PR fetch errors are swallowed (that PR is simply skipped)
-// — only failures detecting the three searches themselves return an error.
+// erroredItem builds a placeholder Item for a PR whose per-PR data couldn't be
+// fetched, from the metadata already in hand. It carries FetchError so the TUI
+// can show the PR (in Outstanding) with the error surfaced instead of dropping
+// it silently. TriggerDate falls back to the PR's creation date for ordering.
+func erroredItem(repo string, meta prMeta, user string, err error) Item {
+	section := SectionReviewing
+	if meta.Author == user {
+		section = SectionAuthored
+	}
+	return Item{
+		Key:          repo + "#" + strconv.Itoa(meta.Number),
+		Number:       meta.Number,
+		Title:        meta.Title,
+		URL:          meta.URL,
+		Section:      section,
+		Author:       meta.Author,
+		FetchError:   err.Error(),
+		TriggerDate:  meta.CreatedAt,
+		CreatedAt:    meta.CreatedAt,
+		TotalCommits: meta.TotalCommitCount,
+	}
+}
+
+// FetchAll fetches and classifies all open, non-draft PRs for `user` in
+// `repo`. Returns items sorted by TriggerDate ascending (oldest activity
+// first, so the longest-waiting PRs surface at the top). A per-PR fetch
+// failure yields a FetchError placeholder item (shown in Outstanding) rather
+// than a dropped PR — only failures of the searches themselves return an error.
 func FetchAll(ctx context.Context, repo, user string) ([]Item, error) {
 	var commenterNodes, authorNodes, allOpenNodes []searchNode
 	var commenterErr, authorErr, allOpenErr error
@@ -1113,6 +1211,10 @@ func FetchAll(ctx context.Context, repo, user string) ([]Item, error) {
 
 			comments, inline, reviews, rawCommits, err := fetchPRData(ctx, repo, number)
 			if err != nil {
+				// Don't drop the PR — surface it with the error instead.
+				itemsMu.Lock()
+				items = append(items, erroredItem(repo, meta, user, err))
+				itemsMu.Unlock()
 				return
 			}
 			activity := buildActivity(comments, inline, reviews)

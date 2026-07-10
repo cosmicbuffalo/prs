@@ -445,10 +445,18 @@ func (m Model) renderListEntry(item Item, selected bool, width int) []string {
 		titleLine = styleItalic.Render(titleLine)
 	}
 	bar := highlightBar(selected)
+	// Hard-cap each line to the column's display width so a line with
+	// wide runes (emoji/CJK) that rune-count truncation under-cuts can't
+	// overflow, wrap to column 0, and break the alignment of the cursor bar.
+	// MaxWidth is display-width-aware and ANSI-safe, and truncates the end,
+	// leaving the leading bar intact.
+	cap := func(line string) string {
+		return lipgloss.NewStyle().MaxWidth(contentWidth).Render(line)
+	}
 	return []string{
-		bar + titleLine,
-		bar + renderEntryBulletLine(item, contentWidth),
-		bar + renderEntrySummaryLine(item, contentWidth),
+		bar + cap(titleLine),
+		bar + cap(renderEntryBulletLine(item, contentWidth)),
+		bar + cap(renderEntrySummaryLine(item, contentWidth)),
 	}
 }
 
@@ -479,42 +487,65 @@ const entryBulletPrefix = "  - "
 // for PRs the user hasn't touched at all, "AUTHOR" for authored items, or
 // "REVIEWER " + the existing bracketed badge label for reviewing items.
 func renderEntryBulletLine(item Item, width int) string {
-	// Suffix showing when the PR's state last changed (the trigger date that
-	// made it show up), e.g. "(updated 3 days ago)", plus the compact
-	// review-icon sequence (if any) — reserve room for both up front so the
-	// label truncation budgets below account for them. "updated" makes it
-	// clear this timestamp is separate from the badge's review state.
+	// A PR whose per-PR data failed to load shows a red error marker in place
+	// of the usual section/badge line — the normal "updated X ago"/icons don't
+	// apply since we never got the data to compute them.
+	if item.FetchError != "" {
+		budget := width - len(entryBulletPrefix)
+		if budget < 1 {
+			budget = 1
+		}
+		return entryBulletPrefix + errorStyle.Render(truncateRunes("⚠ failed to load", budget))
+	}
+
+	avail := width - len(entryBulletPrefix)
+	if avail < 1 {
+		avail = 1
+	}
+
+	// Build the highest-priority "label" part first: the section word plus,
+	// for reviewing items, the bracketed review-state tag (e.g. "[APPROVED]").
+	// The state tag is only truncated if the label itself can't fit — it's
+	// never sacrificed to make room for the lower-priority trailing bits.
+	var labelPlain, labelRendered string
+	switch item.Section {
+	case SectionNew:
+		labelPlain = truncateRunes("NEW", avail)
+		labelRendered = styleYellow.Render(labelPlain)
+	case SectionAuthored:
+		labelPlain = truncateRunes("AUTHOR", avail)
+		labelRendered = sectionAuthorStyle.Render(labelPlain)
+	default:
+		word := "REVIEWER"
+		labelBudget := avail - lipgloss.Width(word) - 1
+		if labelBudget < 0 {
+			labelBudget = 0
+		}
+		state := truncateRunes(reviewStateLabel(item.Badge), labelBudget)
+		labelPlain = word + " " + state
+		badgeStyle := lipgloss.NewStyle().Foreground(reviewStateColor(item.Badge))
+		labelRendered = sectionReviewStyle.Render(word) + " " + badgeStyle.Render(state)
+	}
+
+	// Trailing bits, lower priority than the label and appended only if they
+	// fit in the leftover space: first the "(updated X ago)" recency suffix,
+	// then the review-icon sequence. In a narrow column these drop off (icons
+	// first, then the suffix) rather than overlapping or crowding out the
+	// review-state tag.
+	used := lipgloss.Width(labelPlain)
+	out := entryBulletPrefix + labelRendered
+
 	suffix := " (updated " + relativeTime(item.TriggerDate) + ")"
-	icons := renderReviewIconSequence(item.Reviewers)
-	iconsWidth := 0
-	if icons != "" {
-		iconsWidth = lipgloss.Width(icons) + 1 // +1 for the separating space
+	if used+lipgloss.Width(suffix) <= avail {
+		out += styleDim.Render(suffix)
+		used += lipgloss.Width(suffix)
 	}
-	budget := width - len(entryBulletPrefix) - lipgloss.Width(suffix) - iconsWidth
-	if budget < 1 {
-		budget = 1
+	if icons := renderReviewIconSequence(item.Reviewers); icons != "" {
+		if used+1+lipgloss.Width(icons) <= avail {
+			out += " " + icons
+		}
 	}
-	suffixRendered := styleDim.Render(suffix)
-	if icons != "" {
-		suffixRendered += " " + icons
-	}
-
-	if item.Section == SectionNew {
-		return entryBulletPrefix + styleYellow.Render(truncateRunes("NEW", budget)) + suffixRendered
-	}
-
-	if item.Section == SectionAuthored {
-		return entryBulletPrefix + sectionAuthorStyle.Render(truncateRunes("AUTHOR", budget)) + suffixRendered
-	}
-
-	badgeStyle := lipgloss.NewStyle().Foreground(reviewStateColor(item.Badge))
-	word := "REVIEWER"
-	labelBudget := budget - lipgloss.Width(word) - 1
-	if labelBudget < 1 {
-		labelBudget = 1
-	}
-	label := truncateRunes(reviewStateLabel(item.Badge), labelBudget)
-	return entryBulletPrefix + sectionReviewStyle.Render(word) + " " + badgeStyle.Render(label) + suffixRendered
+	return out
 }
 
 // renderEntrySummaryLine renders the third list-entry line: a dim one-line
@@ -523,6 +554,10 @@ func renderEntrySummaryLine(item Item, width int) string {
 	budget := width - len(entryBulletPrefix)
 	if budget < 1 {
 		budget = 1
+	}
+
+	if item.FetchError != "" {
+		return styleDim.Render(entryBulletPrefix + truncateRunes("press r to retry", budget))
 	}
 
 	if item.Section == SectionNew && item.Author != "" {
@@ -582,6 +617,30 @@ func (m Model) renderDetail(width, height, scroll int) string {
 		innerWidth = 1
 	}
 
+	maxInterior := height - 2
+	if maxInterior < 0 {
+		maxInterior = 0
+	}
+
+	// A PR whose per-PR data failed to load: show what we have (URL, title)
+	// plus the error and a retry hint, in place of the usual detail.
+	if item.FetchError != "" {
+		var lines []string
+		lines = append(lines, styleOrange.Render(truncateRunes(item.URL, innerWidth)))
+		for _, l := range strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(item.Title), "\n") {
+			lines = append(lines, styleBold.Render(l))
+		}
+		lines = append(lines, "")
+		lines = append(lines, errorStyle.Render(truncateRunes("⚠ Failed to load this PR's details", innerWidth)))
+		lines = append(lines, "")
+		for _, l := range strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(item.FetchError), "\n") {
+			lines = append(lines, styleGray.Render(l))
+		}
+		lines = append(lines, "")
+		lines = append(lines, styleDim.Render(truncateRunes("Press r to refresh and try again.", innerWidth)))
+		return renderDetailBox(item.Number, width, innerWidth, maxInterior, lines)
+	}
+
 	// Sticky header: URL, wrapped title, baseline, Review Status (if any),
 	// and a blank spacer — always shown at the top of the panel regardless
 	// of scroll position. Only Comments/Commits below it actually scroll.
@@ -634,10 +693,6 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	}
 	scrollable = append(scrollable, "")
 
-	maxInterior := height - 2
-	if maxInterior < 0 {
-		maxInterior = 0
-	}
 	available := maxInterior - len(header)
 	if available < 0 {
 		available = 0
@@ -659,12 +714,18 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	scrollable = scrollable[scroll:end]
 
 	content := append(header, scrollable...)
+	return renderDetailBox(item.Number, width, innerWidth, maxInterior, content)
+}
+
+// renderDetailBox draws the rounded detail box (top border with the PR number,
+// each content line padded within innerWidth, bottom border), truncating
+// content to maxInterior lines so it never overflows the panel height.
+func renderDetailBox(number, width, innerWidth, maxInterior int, content []string) string {
 	if len(content) > maxInterior {
 		content = content[:maxInterior]
 	}
-
 	var b strings.Builder
-	b.WriteString(renderDetailTopBorder(item.Number, width))
+	b.WriteString(renderDetailTopBorder(number, width))
 	b.WriteString("\n")
 	for _, line := range content {
 		b.WriteString("│ ")
@@ -672,7 +733,6 @@ func (m Model) renderDetail(width, height, scroll int) string {
 		b.WriteString(" │\n")
 	}
 	b.WriteString(renderDetailBottomBorder(width))
-
 	return b.String()
 }
 
@@ -1041,23 +1101,35 @@ func usernameColor(login string) lipgloss.Color {
 // that are meant to stay compact.
 const maxUsernameDisplayRunes = 25
 
-// truncateLogin truncates login to maxUsernameDisplayRunes runes (ellipsis
-// if cut) for display only — color mapping (usernameColor) and any identity
-// comparisons elsewhere always use the untruncated login.
-func truncateLogin(login string) string {
-	return truncateRunes(login, maxUsernameDisplayRunes)
+// displayLogin maps a raw login to the name shown in the UI. GitHub's Copilot
+// review/comment bot logs in under verbose names ("copilot-pull-request-
+// reviewer", "copilot-pull-request-reviewer[bot]", "Copilot"); those all
+// collapse to a plain "copilot". Everything else is returned unchanged.
+func displayLogin(login string) string {
+	if strings.HasPrefix(strings.ToLower(login), "copilot") {
+		return "copilot"
+	}
+	return login
 }
 
-// usernameColored renders login (truncated for display — see
-// maxUsernameDisplayRunes) in that user's unique color, or "" if login is
-// empty. Callers add whatever trailing punctuation/spacing fits their
-// context (a colon before comment text, a trailing space before a commit
-// message, etc).
+// truncateLogin maps login to its display name (see displayLogin) and
+// truncates to maxUsernameDisplayRunes runes (ellipsis if cut) for display
+// only — identity comparisons elsewhere always use the untruncated raw login.
+func truncateLogin(login string) string {
+	return truncateRunes(displayLogin(login), maxUsernameDisplayRunes)
+}
+
+// usernameColored renders login (mapped to its display name and truncated —
+// see truncateLogin) in that user's unique color, or "" if login is empty.
+// The color is keyed on the display name so all of a bot's login variants
+// (e.g. every "copilot*") share one color. Callers add whatever trailing
+// punctuation/spacing fits their context (a colon before comment text, a
+// trailing space before a commit message, etc).
 func usernameColored(login string) string {
 	if login == "" {
 		return ""
 	}
-	return lipgloss.NewStyle().Foreground(usernameColor(login)).Render(truncateLogin(login))
+	return lipgloss.NewStyle().Foreground(usernameColor(displayLogin(login))).Render(truncateLogin(login))
 }
 
 // usernameTag renders "<login> " in that user's unique color, or "" if login
@@ -1083,7 +1155,7 @@ var mentionPattern = regexp.MustCompile(`@[A-Za-z0-9_-]+`)
 func highlightMentions(s string) string {
 	return mentionPattern.ReplaceAllStringFunc(s, func(m string) string {
 		login := strings.TrimPrefix(m, "@")
-		return lipgloss.NewStyle().Foreground(usernameColor(login)).Render("@" + truncateLogin(login))
+		return lipgloss.NewStyle().Foreground(usernameColor(displayLogin(login))).Render("@" + truncateLogin(login))
 	})
 }
 

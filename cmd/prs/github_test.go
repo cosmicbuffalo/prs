@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -14,7 +15,10 @@ func mustParse(t *testing.T, s string) time.Time {
 	return ts
 }
 
-func TestClassifyReviewing_NoQualifyingCommits(t *testing.T) {
+func TestClassifyReviewing_QuietWhenNoNewActivity(t *testing.T) {
+	// The user reviewed the PR and nothing new has landed from anyone else
+	// since. It must still be returned — marked Quiet, so it lands in Done
+	// rather than being dropped.
 	meta := prMeta{Number: 1, Title: "Some PR", URL: "https://example.com/1", Author: "someone-else"}
 	t0 := mustParse(t, "2026-01-01T00:00:00Z")
 
@@ -22,28 +26,42 @@ func TestClassifyReviewing_NoQualifyingCommits(t *testing.T) {
 		{Date: t0, Login: "me", Kind: ActivityComment, Body: "looks good"},
 	}
 	commits := []Commit{
-		// Committed before the user's activity, so it doesn't qualify.
+		// Committed before the user's activity, so it's not "new".
 		{SHA: "aaa", CommitterDate: t0.Add(-time.Hour), AuthorLogin: "someone-else", CommitterLogin: "someone-else"},
 	}
 
-	if item := classifyReviewing("owner/repo", meta, "me", activity, commits, codeownersInfo{}); item != nil {
-		t.Fatalf("expected nil item when there are no qualifying newer commits, got %+v", item)
+	item := classifyReviewing("owner/repo", meta, "me", activity, commits, codeownersInfo{})
+	if item == nil {
+		t.Fatalf("expected a non-nil item (involved PRs are never dropped)")
+	}
+	if !item.Quiet {
+		t.Errorf("expected Quiet=true when there's no new activity, got %+v", item)
+	}
+	if item.Section != SectionReviewing {
+		t.Errorf("Section = %q, want %q", item.Section, SectionReviewing)
 	}
 }
 
-func TestClassifyReviewing_NoActivityFromUser(t *testing.T) {
-	meta := prMeta{Number: 1, Title: "Some PR", URL: "https://example.com/1", Author: "someone-else"}
+func TestClassifyReviewing_NoActivityFromUserFallsBackToCreatedAt(t *testing.T) {
+	// The commenter search surfaced a PR we see no activity from the user on;
+	// baseline falls back to the PR's creation date, so later activity from
+	// others still makes it a (non-Quiet) reviewing item rather than dropping.
 	t0 := mustParse(t, "2026-01-01T00:00:00Z")
+	meta := prMeta{Number: 1, Title: "Some PR", URL: "https://example.com/1", Author: "someone-else", CreatedAt: t0}
 
 	activity := []Activity{
-		{Date: t0, Login: "someone-else", Kind: ActivityComment, Body: "self comment"},
+		{Date: t0.Add(time.Hour), Login: "someone-else", Kind: ActivityComment, Body: "self comment"},
 	}
 	commits := []Commit{
 		{SHA: "aaa", CommitterDate: t0.Add(time.Hour), AuthorLogin: "someone-else", CommitterLogin: "someone-else"},
 	}
 
-	if item := classifyReviewing("owner/repo", meta, "me", activity, commits, codeownersInfo{}); item != nil {
-		t.Fatalf("expected nil item when the user left no activity, got %+v", item)
+	item := classifyReviewing("owner/repo", meta, "me", activity, commits, codeownersInfo{})
+	if item == nil {
+		t.Fatalf("expected a non-nil item")
+	}
+	if item.Quiet {
+		t.Errorf("expected Quiet=false (there's activity after the createdAt baseline), got %+v", item)
 	}
 }
 
@@ -99,12 +117,16 @@ func TestClassifyReviewing_ExcludesCommitByUser(t *testing.T) {
 	}
 	commits := []Commit{
 		// Newer than baseline, but pushed by the user themself (e.g. they
-		// committed after commenting) — must not count as a trigger.
+		// committed after commenting) — must not count as new activity.
 		{SHA: "ccc", CommitterDate: t0.Add(time.Hour), AuthorLogin: "me", CommitterLogin: "me"},
 	}
 
-	if item := classifyReviewing("owner/repo", meta, "me", activity, commits, codeownersInfo{}); item != nil {
-		t.Fatalf("expected nil item when the only newer commit is by the user, got %+v", item)
+	item := classifyReviewing("owner/repo", meta, "me", activity, commits, codeownersInfo{})
+	if item == nil {
+		t.Fatalf("expected a non-nil item")
+	}
+	if !item.Quiet {
+		t.Errorf("expected Quiet=true — the only newer commit is the user's own, so nothing new from others, got %+v", item)
 	}
 }
 
@@ -188,7 +210,9 @@ func TestClassifyReviewing_BadgeIsNoneWithOnlyComments(t *testing.T) {
 	}
 }
 
-func TestClassifyAuthored_NoQualifyingActivity(t *testing.T) {
+func TestClassifyAuthored_QuietWhenNoNewActivity(t *testing.T) {
+	// The user's own PR with no new activity from others since their last push
+	// must still be returned — marked Quiet, so it lands in Done.
 	meta := prMeta{Number: 3, Title: "My PR", URL: "https://example.com/3", Author: "me"}
 	t0 := mustParse(t, "2026-01-01T00:00:00Z")
 
@@ -196,37 +220,63 @@ func TestClassifyAuthored_NoQualifyingActivity(t *testing.T) {
 		{SHA: "aaa", CommitterDate: t0, AuthorLogin: "me", CommitterLogin: "me"},
 	}
 	activity := []Activity{
-		// Older than the last push, so it doesn't qualify.
+		// Older than the last push, so it's not "new".
 		{Date: t0.Add(-time.Hour), Login: "reviewer", Kind: ActivityComment, Body: "old comment"},
 	}
 
-	if item := classifyAuthored("owner/repo", meta, "me", activity, commits, codeownersInfo{}); item != nil {
-		t.Fatalf("expected nil item when there is no newer activity, got %+v", item)
+	item := classifyAuthored("owner/repo", meta, "me", activity, commits, codeownersInfo{})
+	if item == nil {
+		t.Fatalf("expected a non-nil item (authored PRs are never dropped)")
+	}
+	if !item.Quiet {
+		t.Errorf("expected Quiet=true when there is no newer activity, got %+v", item)
+	}
+	if item.BaselineLabel != "your last push" {
+		t.Errorf("BaselineLabel = %q, want %q", item.BaselineLabel, "your last push")
 	}
 }
 
-func TestClassifyAuthored_NoCommits(t *testing.T) {
-	meta := prMeta{Number: 3, Title: "My PR", URL: "https://example.com/3", Author: "me"}
-	if item := classifyAuthored("owner/repo", meta, "me", nil, nil, codeownersInfo{}); item != nil {
-		t.Fatalf("expected nil item when there are no commits at all, got %+v", item)
-	}
-}
-
-func TestClassifyAuthored_NoCommitsOfOwnSkipsEvenWithOthersCommits(t *testing.T) {
-	// Baseline is now "the user's own last push" — if the user has no
-	// commits of their own on their own PR (e.g. a co-authored PR where
-	// someone else pushed everything), the PR is skipped even though there
-	// are commits on it from others. This is the new "no commits" guard,
-	// scoped to the user's own commits.
-	meta := prMeta{Number: 4, Title: "My PR", URL: "https://example.com/4", Author: "me"}
+func TestClassifyAuthored_NoCommitsQuietUsesOpenTimestamp(t *testing.T) {
+	// An authored PR with no commits at all: baseline falls back to the open
+	// timestamp, and with no activity it's a Quiet item labeled "opened".
 	t0 := mustParse(t, "2026-01-01T00:00:00Z")
+	meta := prMeta{Number: 3, Title: "My PR", URL: "https://example.com/3", Author: "me", CreatedAt: t0}
+	item := classifyAuthored("owner/repo", meta, "me", nil, nil, codeownersInfo{})
+	if item == nil {
+		t.Fatalf("expected a non-nil item")
+	}
+	if !item.Quiet {
+		t.Errorf("expected Quiet=true, got %+v", item)
+	}
+	if item.BaselineLabel != "opened" {
+		t.Errorf("BaselineLabel = %q, want %q (no own commits ⇒ baseline is the open timestamp)", item.BaselineLabel, "opened")
+	}
+	if !item.Baseline.Equal(t0) {
+		t.Errorf("Baseline = %v, want the PR createdAt %v", item.Baseline, t0)
+	}
+}
+
+func TestClassifyAuthored_NoCommitsOfOwnUsesOpenTimestampAndSurfacesOthersCommits(t *testing.T) {
+	// A co-authored PR where the user opened it but has no commit of their own
+	// (someone else pushed everything). Baseline falls back to the open
+	// timestamp, so others' commits after it surface it as a (non-Quiet)
+	// authored item rather than dropping it.
+	t0 := mustParse(t, "2026-01-01T00:00:00Z")
+	meta := prMeta{Number: 4, Title: "My PR", URL: "https://example.com/4", Author: "me", CreatedAt: t0}
 
 	commits := []Commit{
-		{SHA: "aaa", CommitterDate: t0, AuthorLogin: "someone-else", CommitterLogin: "someone-else"},
+		{SHA: "aaa", CommitterDate: t0.Add(time.Hour), AuthorLogin: "someone-else", CommitterLogin: "someone-else"},
 	}
 
-	if item := classifyAuthored("owner/repo", meta, "me", nil, commits, codeownersInfo{}); item != nil {
-		t.Fatalf("expected nil item when the user has no commits of their own, got %+v", item)
+	item := classifyAuthored("owner/repo", meta, "me", nil, commits, codeownersInfo{})
+	if item == nil {
+		t.Fatalf("expected a non-nil item (never dropped even without the user's own commits)")
+	}
+	if item.Quiet {
+		t.Errorf("expected Quiet=false (a commit from someone else landed after open), got %+v", item)
+	}
+	if len(item.Commits) != 1 || item.Commits[0].SHA != "aaa" {
+		t.Errorf("Commits = %+v, want the single others' commit aaa", item.Commits)
 	}
 }
 
@@ -717,5 +767,29 @@ func TestParticipantsOrdered_TiebreakIsAlphabetical(t *testing.T) {
 	want := []string{"amy", "zoe"}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("participantsOrdered = %v, want %v (tied counts break alphabetically)", got, want)
+	}
+}
+
+func TestErroredItem_CarriesMetaAndError(t *testing.T) {
+	t0 := mustParse(t, "2026-01-01T00:00:00Z")
+	meta := prMeta{Number: 5, Title: "Broken PR", URL: "https://example.com/5", Author: "me", CreatedAt: t0}
+
+	it := erroredItem("owner/repo", meta, "me", errors.New("boom"))
+	if it.Key != "owner/repo#5" {
+		t.Errorf("Key = %q, want owner/repo#5", it.Key)
+	}
+	if it.FetchError != "boom" {
+		t.Errorf("FetchError = %q, want boom", it.FetchError)
+	}
+	if it.Section != SectionAuthored {
+		t.Errorf("Section = %q, want AUTHOR (author == user)", it.Section)
+	}
+	if !it.TriggerDate.Equal(t0) {
+		t.Errorf("TriggerDate = %v, want createdAt %v", it.TriggerDate, t0)
+	}
+
+	other := prMeta{Number: 6, Title: "Other", URL: "https://example.com/6", Author: "someone-else", CreatedAt: t0}
+	if it := erroredItem("owner/repo", other, "me", errors.New("x")); it.Section != SectionReviewing {
+		t.Errorf("Section = %q, want REVIEW (author != user)", it.Section)
 	}
 }

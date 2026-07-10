@@ -10,7 +10,7 @@ import (
 
 func main() {
 	repo := flag.String("repo", "", "owner/repo override (default: detect from the current git repo)")
-	user := flag.String("user", "", "GitHub login override (default: current gh user)")
+	user := flag.String("as_user", "", "GitHub login whose PR activity to view (default: current gh user)")
 	flag.Parse()
 
 	p := tea.NewProgram(NewModel(*repo, *user), tea.WithAltScreen(), tea.WithMouseCellMotion())

@@ -33,7 +33,7 @@ const mouseScrollStep = 3
 type Model struct {
 	keys KeyMap
 
-	// repoOverride / userOverride are the --repo / --user flag values,
+	// repoOverride / userOverride are the --repo / --as_user flag values,
 	// threaded through to RepoFromCwd / CurrentUser on every fetch.
 	repoOverride string
 	userOverride string
@@ -173,7 +173,7 @@ func fetchAllCmd(repo, user string) tea.Cmd {
 		// fresh results that were just fetched successfully.
 		_ = SaveCache(repo, user, items)
 
-		store, err := LoadStore()
+		store, err := LoadStore(user)
 		if err != nil {
 			return fetchResultMsg{repo: repo, user: user, err: err}
 		}

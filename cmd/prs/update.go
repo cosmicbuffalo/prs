@@ -57,7 +57,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A subsequent "r" refresh already has good in-memory data, so it
 		// skips this — no need to touch what's already on screen.
 		if !m.hasData {
-			if store, err := LoadStore(); err == nil {
+			if store, err := LoadStore(msg.user); err == nil {
 				m.store = store
 				if cached, ok := LoadCache(msg.repo, msg.user); ok {
 					m.classify(cached)
@@ -380,14 +380,18 @@ func (m Model) copySelected() (tea.Model, tea.Cmd) {
 }
 
 // classify splits items into the outstanding/new/done/ignored tabs based on
-// the store's current verdict for each and each item's Section (relative
+// the store's current verdict for each and each item's Section/flags (relative
 // order within each resulting tab is preserved from the input slice), then
-// clamps every tab's cursor in-bounds. Precedence (highest first): Ignored,
-// then Done, then SectionNew goes to New, then everything else
-// (Reviewing/Authored) goes to Outstanding. Ignored and Done are otherwise
-// independent flags — a PR can be both, in which case it's shown in Ignored
-// until un-ignored, at which point it reveals whichever of Done/New/
-// Outstanding it belongs in.
+// clamps every tab's cursor in-bounds. Precedence (highest first):
+//   - Ignored (store flag) — an ignored PR stays hidden regardless of anything
+//     else, including a fetch error.
+//   - FetchError — a PR whose data failed to load is shown in Outstanding so
+//     the failure is visible and a refresh is prompted.
+//   - Done — either the store's done flag OR an intrinsically Quiet PR (the
+//     user is involved but nothing new has happened); both mean "nothing to
+//     do right now".
+//   - New (SectionNew) — a PR the user hasn't touched at all.
+//   - Outstanding — everything else (Reviewing/Authored with new activity).
 func (m *Model) classify(items []Item) {
 	outstanding := make([]Item, 0, len(items))
 	newItems := make([]Item, 0, len(items))
@@ -397,7 +401,9 @@ func (m *Model) classify(items []Item) {
 		switch {
 		case m.store != nil && m.store.IsIgnored(it):
 			ignored = append(ignored, it)
-		case m.store != nil && m.store.IsDone(it):
+		case it.FetchError != "":
+			outstanding = append(outstanding, it)
+		case (m.store != nil && m.store.IsDone(it)) || it.Quiet:
 			done = append(done, it)
 		case it.Section == SectionNew:
 			newItems = append(newItems, it)

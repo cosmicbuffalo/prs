@@ -108,8 +108,10 @@ type ReviewEvent struct {
 	IsCodeowner bool
 }
 
-// Item is a single PR that currently qualifies for attention (has new
-// activity relative to the relevant baseline).
+// Item is a single PR surfaced by prs. Most items have new activity relative
+// to the relevant baseline (and land in Outstanding/New); a Quiet item is one
+// the user is involved in but that has no new activity (it lands in Done), and
+// a FetchError item is one whose per-PR data couldn't be loaded this refresh.
 type Item struct {
 	Key           string // "<owner>/<repo>#<number>"
 	Number        int
@@ -122,6 +124,21 @@ type Item struct {
 	BaselineLabel string
 	Detail        []DetailLine // reviewing: my comments/reviews; authored: others' newer comments/reviews
 	Commits       []Commit     // newer commits not authored/committed by me (the ones actually shown)
+
+	// Quiet is true when the user is involved in this PR (authored it, or
+	// commented/reviewed on it) but there's been no new activity from anyone
+	// else since their baseline — i.e. nothing needs attention. These land in
+	// the Done tab (see classify) rather than being dropped, so involved-but-
+	// idle PRs stay visible. A later fetch that finds new activity produces a
+	// non-Quiet item, moving it back to Outstanding automatically.
+	Quiet bool
+
+	// FetchError, when non-empty, means this PR's per-PR data (comments,
+	// reviews, commits) couldn't be fetched on the last refresh. The item is
+	// still shown (in Outstanding) from the metadata already in hand, with the
+	// error surfaced in place of the usual detail, and clears on the next
+	// successful refresh.
+	FetchError string
 
 	// TotalCommits is the PR's total commit count (all authors, regardless
 	// of date, from GitHub's own aggregate count — not len(Commits)), used
