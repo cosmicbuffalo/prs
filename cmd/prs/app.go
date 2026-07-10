@@ -29,6 +29,54 @@ const detailScrollStep = 8
 // sends several events per physical "click".
 const mouseScrollStep = 3
 
+// transitionStepDelay is how long each phase of a telegraphed Enter/i toggle
+// lingers before advancing to the next (see transitionPhase). Total time
+// from keypress to the PR actually moving is roughly 3× this.
+const transitionStepDelay = 350 * time.Millisecond
+
+// transitionKind identifies which key started a telegraphed toggle — Enter
+// (the Done/undone key) or i (the Ignored/un-ignored key). It's used to match
+// a follow-up keypress against an in-flight transition (same key ⇒ cancel,
+// other key ⇒ redirect); the actual destination bucket a press resolves to is
+// computed separately (see destTabFor) since either key can also move an item
+// back OUT of Done/Ignored toward its natural bucket.
+type transitionKind int
+
+const (
+	transitionDone   transitionKind = iota // Enter key: → Done, or back out of Done
+	transitionIgnore                       // i key: → Ignored, or back out of Ignored
+)
+
+// transitionPhase steps a pending toggle through its telegraph animation
+// before the change is committed to the store and the PR actually moves.
+type transitionPhase int
+
+const (
+	phaseCursor transitionPhase = iota // cursor bar recolored; PR still in place
+	phaseTab                           // destination tab label highlighted
+	phaseCount                         // destination tab count shown incremented
+	phaseCommit                        // apply to store + reclassify (PR leaves)
+)
+
+// transition is an in-flight, not-yet-committed Enter/i toggle being
+// telegraphed to the user (so they can watch it, cancel it by pressing the
+// same key again, or redirect it by pressing the other key). Exactly one is
+// active at a time. epoch guards against stale tick timers after a
+// cancel/redirect: only a tick whose epoch matches the live transition's is
+// acted on.
+type transition struct {
+	key  string
+	kind transitionKind
+	// destTab is the tab the PR is telegraphing toward — tabDone/tabIgnored
+	// when marking, or its natural bucket (Outstanding/New/Done) when a press
+	// moves it back out. It drives which tab flashes and the animation color
+	// (bucketColor(destTab)), so a move back out shows its destination's color
+	// rather than always green/red.
+	destTab int
+	phase   transitionPhase
+	epoch   int
+}
+
 // Model is the root Bubble Tea model for the prs TUI.
 type Model struct {
 	keys KeyMap
@@ -76,6 +124,12 @@ type Model struct {
 	// change (cursor move, tab switch, toggle, refresh) so a new PR's detail
 	// always opens scrolled to the top.
 	detailScroll int
+
+	// transition holds the currently-telegraphing Enter/i toggle, if any (see
+	// the transition type). transitionEpoch is bumped on every start/cancel/
+	// redirect so stale phase-tick timers can be ignored.
+	transition      *transition
+	transitionEpoch int
 
 	// statusMsg is the transient one-line message shown above the footer
 	// (e.g. "Copied to clipboard", or a copy/fetch error). statusEpoch

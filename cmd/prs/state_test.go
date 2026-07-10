@@ -116,28 +116,37 @@ func TestMarkUnignoredRemovesIgnoredFlag(t *testing.T) {
 	}
 }
 
-func TestIgnoredAndDoneAreIndependent(t *testing.T) {
-	s := newStoreAtPath(filepath.Join(t.TempDir(), "state.json"), "alice")
+func TestMarkingOneBucketClearsTheOther(t *testing.T) {
 	item := Item{Key: "owner/repo#1", TriggerDate: time.Now()}
 
+	// Done then Ignored: the item ends up only ignored.
+	s := newStoreAtPath(filepath.Join(t.TempDir(), "state.json"), "alice")
 	if err := s.MarkDone(item); err != nil {
 		t.Fatalf("MarkDone: %v", err)
 	}
 	if err := s.MarkIgnored(item); err != nil {
 		t.Fatalf("MarkIgnored: %v", err)
 	}
-	if !s.IsDone(item) || !s.IsIgnored(item) {
-		t.Fatal("expected both IsDone and IsIgnored to be true when both flags are set")
+	if !s.IsIgnored(item) {
+		t.Fatal("expected IsIgnored to be true after MarkIgnored")
+	}
+	if s.IsDone(item) {
+		t.Fatal("expected MarkIgnored to clear the done flag — an item lives in exactly one bucket")
 	}
 
-	if err := s.MarkUnignored(item); err != nil {
-		t.Fatalf("MarkUnignored: %v", err)
+	// Ignored then Done: the item ends up only done.
+	s2 := newStoreAtPath(filepath.Join(t.TempDir(), "state.json"), "alice")
+	if err := s2.MarkIgnored(item); err != nil {
+		t.Fatalf("MarkIgnored: %v", err)
 	}
-	if s.IsIgnored(item) {
-		t.Fatal("expected IsIgnored to be false after MarkUnignored")
+	if err := s2.MarkDone(item); err != nil {
+		t.Fatalf("MarkDone: %v", err)
 	}
-	if !s.IsDone(item) {
-		t.Fatal("expected IsDone to remain true after MarkUnignored — the two flags should be independent")
+	if !s2.IsDone(item) {
+		t.Fatal("expected IsDone to be true after MarkDone")
+	}
+	if s2.IsIgnored(item) {
+		t.Fatal("expected MarkDone to clear the ignored flag — an item lives in exactly one bucket")
 	}
 }
 
@@ -165,11 +174,8 @@ func TestStateIsScopedPerUser(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	item := Item{Key: "owner/repo#1", TriggerDate: time.Now()}
 
-	// alice marks the PR done + ignored.
+	// alice marks the PR ignored.
 	alice := newStoreAtPath(path, "alice")
-	if err := alice.MarkDone(item); err != nil {
-		t.Fatalf("alice MarkDone: %v", err)
-	}
 	if err := alice.MarkIgnored(item); err != nil {
 		t.Fatalf("alice MarkIgnored: %v", err)
 	}
@@ -188,8 +194,11 @@ func TestStateIsScopedPerUser(t *testing.T) {
 		t.Fatalf("bob MarkDone: %v", err)
 	}
 	aliceReloaded := newStoreAtPath(path, "alice")
-	if !aliceReloaded.IsDone(item) || !aliceReloaded.IsIgnored(item) {
-		t.Fatal("expected alice's done+ignored state to survive bob's writes")
+	if !aliceReloaded.IsIgnored(item) {
+		t.Fatal("expected alice's ignored state to survive bob's writes")
+	}
+	if aliceReloaded.IsDone(item) {
+		t.Fatal("expected alice not to see bob's done state")
 	}
 }
 

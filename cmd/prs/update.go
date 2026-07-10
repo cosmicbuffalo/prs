@@ -22,6 +22,21 @@ type clearStatusMsg struct {
 	epoch int
 }
 
+// transitionTickMsg advances a telegraphed Enter/i toggle to its next phase.
+// epoch is compared against the live transition's epoch so a stale tick (from
+// a since-cancelled or -redirected transition) is ignored.
+type transitionTickMsg struct {
+	epoch int
+}
+
+// transitionTickCmd schedules the next phase advance for the transition with
+// the given epoch.
+func transitionTickCmd(epoch int) tea.Cmd {
+	return tea.Tick(transitionStepDelay, func(time.Time) tea.Msg {
+		return transitionTickMsg{epoch: epoch}
+	})
+}
+
 // Update is the Bubble Tea update function.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -82,6 +97,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		m.store = msg.store
+		// A refresh reclassifies everything; a mid-flight telegraphed toggle
+		// would be pointing at now-stale data, so drop it.
+		m.transition = nil
+		m.transitionEpoch++
 		m.classify(msg.items)
 		m.hasData = true
 		m.detailScroll = 0
@@ -102,6 +121,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = ""
 		}
 		return m, nil
+
+	case transitionTickMsg:
+		if m.transition == nil || msg.epoch != m.transition.epoch {
+			return m, nil // stale tick from a cancelled/redirected transition
+		}
+		m.transition.phase++
+		if m.transition.phase >= phaseCommit {
+			t := m.transition
+			m.transition = nil
+			m.applyTransition(t)
+			return m, nil
+		}
+		return m, transitionTickCmd(m.transition.epoch)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -180,6 +212,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = true
 		m.err = nil
+		m.transition = nil
+		m.transitionEpoch++
 		return m, tea.Batch(m.spinner.Tick, resolveRepoUserCmd(m.repoOverride, m.userOverride))
 	}
 
@@ -215,10 +249,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Toggle):
-		return m.toggleSelectedDone()
+		return m.startTransition(transitionDone)
 
 	case key.Matches(msg, m.keys.Ignore):
-		return m.toggleSelectedIgnored()
+		return m.startTransition(transitionIgnore)
 
 	case key.Matches(msg, m.keys.ScrollDown):
 		m.detailScroll += detailScrollStep
@@ -312,58 +346,145 @@ func (m Model) allItems() []Item {
 	return all
 }
 
-// toggleSelectedDone marks the selected item done (from any tab other than
-// Done) or undone (from Done), then reclassifies every known item via
-// store.IsDone/IsIgnored and clamps every tab's cursor to stay in-bounds.
-func (m Model) toggleSelectedDone() (tea.Model, tea.Cmd) {
-	item, ok := m.selectedItem()
-	if !ok || m.store == nil {
-		return m, nil
+// itemByKey finds the item with the given key across all tabs.
+func (m Model) itemByKey(key string) (Item, bool) {
+	for _, tab := range m.items {
+		for _, it := range tab {
+			if it.Key == key {
+				return it, true
+			}
+		}
 	}
-
-	var err error
-	if m.activeTab == tabDone {
-		err = m.store.MarkUndone(item)
-	} else {
-		// From Outstanding, New, or Ignored, Enter marks the PR done.
-		err = m.store.MarkDone(item)
-	}
-	if err != nil {
-		m.err = err
-		return m, nil
-	}
-
-	m.classify(m.allItems())
-	m.detailScroll = 0
-	return m, nil
+	return Item{}, false
 }
 
-// toggleSelectedIgnored marks the selected item ignored (from any tab other
-// than Ignored) or un-ignored (from Ignored), then reclassifies every known
-// item and clamps every tab's cursor to stay in-bounds. Ignored takes
-// precedence over Done for tab placement (see classify), but the two flags
-// are otherwise independent — un-ignoring a PR that's also marked done
-// simply reveals it in Done rather than Outstanding/New.
-func (m Model) toggleSelectedIgnored() (tea.Model, tea.Cmd) {
+// naturalTab returns the tab an item lands in based only on its intrinsic
+// state (FetchError/Quiet/Section), ignoring any Done/Ignored store flag —
+// i.e. where it goes once it's neither marked done nor ignored. It mirrors the
+// non-store branches of classify; keep the two in sync.
+func naturalTab(item Item) int {
+	switch {
+	case item.FetchError != "":
+		return tabOutstanding
+	case item.Quiet:
+		return tabDone
+	case item.Section == SectionNew:
+		return tabNew
+	default:
+		return tabOutstanding
+	}
+}
+
+// destTabFor resolves which tab a keypress of kind would send item toward,
+// given the store's current verdict. Enter (transitionDone) heads to Done, or
+// back to the item's natural bucket if it's already done; i (transitionIgnore)
+// heads to Ignored, or back to the natural bucket if it's already ignored.
+// (Marking done clears ignored and vice versa, so e.g. Enter on an ignored PR
+// still resolves to Done.)
+func (m Model) destTabFor(item Item, kind transitionKind) int {
+	if kind == transitionIgnore {
+		if m.store.IsIgnored(item) {
+			return naturalTab(item)
+		}
+		return tabIgnored
+	}
+	if m.store.IsDone(item) {
+		return naturalTab(item)
+	}
+	return tabDone
+}
+
+// applyToggle performs the store mutation a keypress of kind implies for item:
+// Enter toggles done, i toggles ignored. Marking one clears the other (see
+// Store.MarkDone/MarkIgnored), so an item is only ever in one of the two.
+func (m *Model) applyToggle(item Item, kind transitionKind) error {
+	if kind == transitionIgnore {
+		if m.store.IsIgnored(item) {
+			return m.store.MarkUnignored(item)
+		}
+		return m.store.MarkIgnored(item)
+	}
+	if m.store.IsDone(item) {
+		return m.store.MarkUndone(item)
+	}
+	return m.store.MarkDone(item)
+}
+
+// startTransition handles an Enter (transitionDone) or i (transitionIgnore)
+// press on the selected PR. It resolves where that press sends the PR — into
+// Done/Ignored, or back out to its natural bucket if it's already there (see
+// destTabFor) — and telegraphs the move as a phased animation that only
+// commits to the store once it finishes (see the transition type and
+// transitionTickMsg). If the destination is the tab already in view (nothing
+// would visibly move, e.g. un-doing an intrinsically Quiet PR), it's applied
+// instantly with no telegraph.
+//
+// While a transition is in flight: pressing the same key again on the same PR
+// cancels it; pressing the other key redirects it toward the other
+// destination (restarting the animation). A transition in flight on a
+// different PR is committed immediately before this one is acted on, so only
+// one is ever live at a time.
+func (m Model) startTransition(kind transitionKind) (tea.Model, tea.Cmd) {
 	item, ok := m.selectedItem()
 	if !ok || m.store == nil {
 		return m, nil
 	}
 
-	var err error
-	if m.activeTab == tabIgnored {
-		err = m.store.MarkUnignored(item)
-	} else {
-		err = m.store.MarkIgnored(item)
-	}
-	if err != nil {
-		m.err = err
+	// Same PR already telegraphing + same key ⇒ cancel the pending move.
+	if m.transition != nil && m.transition.key == item.Key && m.transition.kind == kind {
+		m.transition = nil
+		m.transitionEpoch++
 		return m, nil
 	}
 
+	// A transition in flight on a *different* PR is committed now (its intended
+	// end state) before we act on this one. A same-PR transition (i.e. a
+	// redirect via the other key) is instead discarded in favor of the new
+	// destination resolved below.
+	if m.transition != nil && m.transition.key != item.Key {
+		m.applyTransition(m.transition)
+	}
+	m.transition = nil
+
+	destTab := m.destTabFor(item, kind)
+
+	// Destination is the tab already in view — nothing would visibly move, so
+	// apply the toggle instantly with no telegraph.
+	if destTab == m.activeTab {
+		m.transitionEpoch++
+		if err := m.applyToggle(item, kind); err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.classify(m.allItems())
+		m.detailScroll = 0
+		return m, nil
+	}
+
+	m.transitionEpoch++
+	m.transition = &transition{
+		key:     item.Key,
+		kind:    kind,
+		destTab: destTab,
+		phase:   phaseCursor,
+		epoch:   m.transitionEpoch,
+	}
+	return m, transitionTickCmd(m.transitionEpoch)
+}
+
+// applyTransition commits a telegraphed toggle to the store and reclassifies
+// so the PR moves into its destination tab.
+func (m *Model) applyTransition(t *transition) {
+	item, ok := m.itemByKey(t.key)
+	if !ok || m.store == nil {
+		return
+	}
+	if err := m.applyToggle(item, t.kind); err != nil {
+		m.err = err
+		return
+	}
 	m.classify(m.allItems())
 	m.detailScroll = 0
-	return m, nil
 }
 
 // copySelected copies the selected item's URL to the clipboard.

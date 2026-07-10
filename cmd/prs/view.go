@@ -55,16 +55,24 @@ func leftMarginStr() string {
 // column, removed since the bar alone conveys the selection clearly).
 const highlightBarWidth = 2
 
-// highlightBar renders the vertical highlight bar for one list line: an
-// orange "▊" (a partial block glyph that reads as ~75% of a full cell's
-// width — thick, but not a solid full-width block) followed by a blank
-// space when this line belongs to the selected entry, or blank space of the
-// same total width otherwise.
-func highlightBar(selected bool) string {
+// highlightBar renders the vertical highlight bar for one list line: a "▊" (a
+// partial block glyph that reads as ~75% of a full cell's width — thick, but
+// not a solid full-width block) in the given color followed by a blank space
+// when this line belongs to the selected entry, or blank space of the same
+// total width otherwise. The color is the current bucket's accent (see
+// bucketColor), so the cursor reads green in Done, red in Ignored, etc.
+func highlightBar(selected bool, color lipgloss.Color) string {
 	if selected {
-		return styleOrange.Render("▊") + " "
+		return lipgloss.NewStyle().Foreground(color).Render("▊") + " "
 	}
 	return strings.Repeat(" ", highlightBarWidth)
+}
+
+// transitionBar renders the cursor bar recolored for an in-flight toggle, in
+// the destination bucket's accent color (green heading to Done, red to
+// Ignored, orange/white heading back out).
+func transitionBar(destTab int) string {
+	return lipgloss.NewStyle().Foreground(bucketColor(destTab)).Render("▊") + " "
 }
 
 // View renders the full TUI: a blank top margin, header, tab bar, a blank
@@ -115,9 +123,13 @@ func (m Model) renderHeader() string {
 // below it), while inactive tabs sit flush on the baseline rule. The rule
 // extends to fill the rest of the terminal width.
 // tabDef pairs a tab's rendered label with its Model.items/cursors index.
+// highlight, when non-nil, is the color the label should be drawn in — set
+// on the destination tab of an in-flight telegraphed toggle so it flashes as
+// the PR heads toward it.
 type tabDef struct {
-	label string
-	idx   int
+	label     string
+	idx       int
+	highlight *lipgloss.Color
 }
 
 // tabGapWidth is the blank/rule gap rendered between adjacent tabs.
@@ -128,12 +140,44 @@ const tabGapWidth = 2
 // by renderTabBar (to render them) and tabBoundaries (to hit-test mouse
 // clicks against them), so the two can never drift out of sync.
 func (m Model) tabDefs() []tabDef {
-	return []tabDef{
-		{fmt.Sprintf(" Outstanding (%d) ", len(m.items[tabOutstanding])), tabOutstanding},
-		{fmt.Sprintf(" New (%d) ", len(m.items[tabNew])), tabNew},
-		{fmt.Sprintf(" Done (%d) ", len(m.items[tabDone])), tabDone},
-		{fmt.Sprintf(" Ignored (%d) ", len(m.items[tabIgnored])), tabIgnored},
+	counts := [4]int{
+		len(m.items[tabOutstanding]),
+		len(m.items[tabNew]),
+		len(m.items[tabDone]),
+		len(m.items[tabIgnored]),
 	}
+
+	// During a telegraphed toggle, flash the destination tab's label (from
+	// phaseTab on) and show its count already incremented (from phaseCount
+	// on) — before the PR has actually moved there.
+	destTab := -1
+	var destColor lipgloss.Color
+	if m.transition != nil {
+		destTab = m.transition.destTab
+		destColor = bucketColor(destTab)
+		if m.transition.phase >= phaseCount {
+			counts[destTab]++
+		}
+	}
+
+	labels := [4]string{
+		fmt.Sprintf(" Outstanding (%d) ", counts[tabOutstanding]),
+		fmt.Sprintf(" New (%d) ", counts[tabNew]),
+		fmt.Sprintf(" Done (%d) ", counts[tabDone]),
+		fmt.Sprintf(" Ignored (%d) ", counts[tabIgnored]),
+	}
+	idxs := [4]int{tabOutstanding, tabNew, tabDone, tabIgnored}
+
+	defs := make([]tabDef, 4)
+	for i := 0; i < 4; i++ {
+		d := tabDef{label: labels[i], idx: idxs[i]}
+		if idxs[i] == destTab && m.transition != nil && m.transition.phase >= phaseTab {
+			c := destColor
+			d.highlight = &c
+		}
+		defs[i] = d
+	}
+	return defs
 }
 
 // tabBoundaries returns, for each tab in tabDefs() order, the half-open
@@ -164,7 +208,7 @@ func (m Model) renderTabBar() string {
 	margin := leftMarginStr()
 	top, mid, bottom := margin, margin, margin
 	for i, t := range tabs {
-		tTop, tMid, tBottom := renderTab(t.label, m.activeTab == t.idx)
+		tTop, tMid, tBottom := renderTab(t.label, m.activeTab == t.idx, bucketColor(t.idx), t.highlight)
 		if i > 0 {
 			top += blankGap
 			mid += blankGap
@@ -191,17 +235,29 @@ func (m Model) renderTabBar() string {
 // rule ("╯"/"╰") so the tab reads as connected to the line beneath it,
 // rather than floating above a gap. An inactive tab is plain text sitting
 // flush on the baseline rule.
-func renderTab(label string, active bool) (top, mid, bottom string) {
+func renderTab(label string, active bool, activeColor lipgloss.Color, highlight *lipgloss.Color) (top, mid, bottom string) {
 	width := lipgloss.Width(label)
 	border := tabBorderStyle
+
+	// The label text style: a transition-highlight color (bold) takes
+	// precedence; otherwise the active tab is drawn in its own bucket's accent
+	// color (bold) and inactive tabs stay gray.
+	labelStyle := inactiveTabStyle
+	if active {
+		labelStyle = lipgloss.NewStyle().Foreground(activeColor).Bold(true)
+	}
+	if highlight != nil {
+		labelStyle = lipgloss.NewStyle().Foreground(*highlight).Bold(true)
+	}
+
 	if active {
 		top = border.Render("╭" + strings.Repeat("─", width) + "╮")
-		mid = border.Render("│") + activeTabStyle.Render(label) + border.Render("│")
+		mid = border.Render("│") + labelStyle.Render(label) + border.Render("│")
 		bottom = border.Render("╯") + strings.Repeat(" ", width) + border.Render("╰")
 		return
 	}
 	top = strings.Repeat(" ", width+2)
-	mid = " " + inactiveTabStyle.Render(label) + " "
+	mid = " " + labelStyle.Render(label) + " "
 	bottom = border.Render(strings.Repeat("─", width+2))
 	return
 }
@@ -444,7 +500,15 @@ func (m Model) renderListEntry(item Item, selected bool, width int) []string {
 	if selected {
 		titleLine = styleItalic.Render(titleLine)
 	}
-	bar := highlightBar(selected)
+	// The cursor bar takes the active bucket's accent color (green in Done,
+	// red in Ignored, orange in Outstanding, white in New).
+	bar := highlightBar(selected, bucketColor(m.activeTab))
+	// A PR mid-telegraphed-toggle shows its cursor bar recolored to its
+	// destination bucket regardless of where the cursor actually is, so the
+	// in-flight move is visible on its own row.
+	if m.transition != nil && m.transition.key == item.Key {
+		bar = transitionBar(m.transition.destTab)
+	}
 	// Hard-cap each line to the column's display width so a line with
 	// wide runes (emoji/CJK) that rune-count truncation under-cuts can't
 	// overflow, wrap to column 0, and break the alignment of the cursor bar.

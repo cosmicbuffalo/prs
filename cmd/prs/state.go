@@ -147,12 +147,14 @@ func (s *Store) IsDone(item Item) bool {
 
 // MarkDone records item as done as-of its current TriggerDate and persists
 // the store to disk immediately (atomic write: temp file in the same dir + rename).
-// Any existing Ignored flag for item.Key is preserved.
+// Marking done also clears any Ignored flag for item.Key: an item lives in
+// exactly one of Done/Ignored, so moving it into Done takes it out of Ignored.
 func (s *Store) MarkDone(item Item) error {
 	s.mu.Lock()
 	mine := s.mineLocked()
 	entry := mine[item.Key]
 	entry.DoneUntil = item.TriggerDate
+	entry.Ignored = false
 	mine[item.Key] = entry
 	s.mu.Unlock()
 
@@ -183,13 +185,15 @@ func (s *Store) IsIgnored(item Item) bool {
 	return s.users[s.user][item.Key].Ignored
 }
 
-// MarkIgnored records item as ignored and persists the store to disk. Any
-// existing DoneUntil for item.Key is preserved.
+// MarkIgnored records item as ignored and persists the store to disk. Marking
+// ignored also clears any DoneUntil for item.Key: an item lives in exactly one
+// of Done/Ignored, so moving it into Ignored takes it out of Done.
 func (s *Store) MarkIgnored(item Item) error {
 	s.mu.Lock()
 	mine := s.mineLocked()
 	entry := mine[item.Key]
 	entry.Ignored = true
+	entry.DoneUntil = time.Time{}
 	mine[item.Key] = entry
 	s.mu.Unlock()
 

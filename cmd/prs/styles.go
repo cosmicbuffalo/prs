@@ -16,6 +16,7 @@ var (
 	colorMagenta = lipgloss.Color("5")
 	colorOrange  = lipgloss.Color("208")
 	colorYellow  = lipgloss.Color("3")
+	colorWhite   = lipgloss.Color("15")
 
 	styleApproved         = lipgloss.NewStyle().Foreground(colorGreen)
 	styleWeakApproved     = lipgloss.NewStyle().Foreground(colorYellow) // an approval that's valid but not from the trusted-reviewer team — yellow so it's clearly distinct from both a full (green) approval and a superseded (gray) one
@@ -33,7 +34,6 @@ var (
 	sectionReviewStyle = lipgloss.NewStyle().Foreground(colorCyan).Bold(true)
 	sectionAuthorStyle = lipgloss.NewStyle().Foreground(colorMagenta).Bold(true)
 
-	activeTabStyle   = lipgloss.NewStyle().Bold(true)
 	inactiveTabStyle = lipgloss.NewStyle().Foreground(colorGray)
 	tabBorderStyle   = lipgloss.NewStyle().Foreground(colorGray)
 
@@ -46,3 +46,24 @@ var (
 	statusStyle  = lipgloss.NewStyle().Foreground(chipFg)
 	errorStyle   = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
 )
+
+// bucketColors is the accent color for each tab/bucket, indexed by tab
+// (tabOutstanding/tabNew/tabDone/tabIgnored). It's the single source of truth
+// for the per-bucket color used by the list cursor bar, the selected tab
+// label, and the telegraphed toggle animation, so all three always agree:
+// Outstanding=orange, New=white, Done=green, Ignored=red.
+var bucketColors = [4]lipgloss.Color{
+	tabOutstanding: colorOrange,
+	tabNew:         colorWhite,
+	tabDone:        colorGreen,
+	tabIgnored:     colorRed,
+}
+
+// bucketColor returns the accent color for a tab, falling back to the
+// Outstanding orange for any out-of-range index.
+func bucketColor(tab int) lipgloss.Color {
+	if tab < 0 || tab >= len(bucketColors) {
+		return colorOrange
+	}
+	return bucketColors[tab]
+}
