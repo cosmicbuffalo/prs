@@ -73,9 +73,15 @@ PRs are sorted into four tabs, switched with `←`/`→`. Only open, non-draft P
   - For **New** PRs, only a new **commit** reopens it — comments alone won't.
 - **`i` marks a PR ignored** → it moves to **Ignored**. Unlike Done, this is a permanent mute: it never comes back on its own, no matter what activity lands. Press `i` again on an Ignored PR to un-mute it, and it drops back into whichever tab it naturally belongs in.
 
-Ignored takes precedence over Done, which takes precedence over New/Outstanding — so a PR that's both ignored and done shows in Ignored until un-ignored.
+A PR lives in exactly one bucket: marking it done clears any ignored state and vice versa. Moving a PR (in either direction, including back out of Done/Ignored) is **telegraphed** with a brief animation — the cursor recolors to the destination bucket, the destination tab flashes, and its count ticks up before the PR actually moves. While it's animating you can **cancel** by pressing the same key again, or **redirect** it to the other bucket by pressing the other key, before the move commits.
 
-Your Done and Ignored states are saved to disk (`~/.local/state/prs/state.json`) and survive restarts.
+Your Done and Ignored states are saved to disk (`~/.local/state/prs/state.json`), scoped per user context, and survive restarts.
+
+## Detail panel
+
+Selecting a PR shows its details alongside the list: the URL and title, a summary (who opened it, diff size, commit/comment counts, participant list), the review status, and the recent comment/commit thread.
+
+The **Review Status** section is always shown, with a grayed-out "No reviews yet" when a PR has none. For **New** PRs the full comment/review/commit data is fetched lazily the first time you select the PR (you'll briefly see "Loading…", and its counts show `…` until it lands), so the initial load and refreshes stay fast.
 
 ## Keybindings
 
@@ -87,10 +93,21 @@ Your Done and Ignored states are saved to disk (`~/.local/state/prs/state.json`)
 | `i` | Toggle the selected PR's **ignored** state |
 | `o` | Copy the selected PR's URL to the clipboard |
 | `Ctrl+D` / `Ctrl+U` | Scroll the detail panel down / up |
+| `v` | Toggle between horizontal and vertical layout |
 | `r` | Re-fetch everything from scratch |
+| `?` | Show/hide the keybindings help overlay |
 | `q` / `Ctrl+C` | Quit |
 
+Only `Enter`, `i`, `?`, and `q` are shown in the footer; press `?` for the full list above in a floating overlay.
+
 The mouse works too: click a tab or a PR to select it, and scroll the wheel over the list or the detail panel to scroll that side.
+
+### Layout
+
+`v` toggles between two layouts:
+
+- **Horizontal** (default) — PR list on the left, detail panel on the right. The detail panel's header (URL, title, PR details, review status) stays pinned while the comment/commit thread below it scrolls.
+- **Vertical** — PR list across the full width on top, detail panel across the full width on the bottom. The whole detail panel scrolls as one.
 
 ## Requirements
 
