@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO_URL="${PRS_REPO_URL:-}"
+REPO_URL="${PRS_REPO_URL:-https://github.com/cosmicbuffalo/prs.git}"
 INSTALL_DIR="${PRS_INSTALL_DIR:-$HOME/.prs}"
 BIN_DIR="${PRS_BIN_DIR:-$HOME/.local/bin}"
 

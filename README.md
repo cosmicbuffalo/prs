@@ -1,64 +1,42 @@
 # prs
 
-A terminal UI that tells me which open GitHub PRs in a repo actually need my attention right now, instead of every open PR. I kept running into two flavors of "this went stale after I looked at it": I'd review someone's PR, they'd push new commits, and it would quietly fall out of my head — or I'd push my own PR, someone would leave a comment, and it would sit unanswered because nothing forced it back onto my radar. `prs` watches for exactly those two situations and surfaces only the PRs where something changed since the last time I touched them.
+A terminal UI that surfaces only the open GitHub PRs in a repo that actually need your attention right now — not every open PR.
 
-## How It Works
+It watches for the two ways a PR quietly goes stale after you've looked at it:
 
-```
-                     gh api / gh api graphql
-                              │
-                              ▼
-                    open PRs in owner/repo
-                              │
-              ┌───────────────┴───────────────┐
-              ▼                                ▼
-      Reviewing check                   Authored check
-  (PRs I commented/reviewed          (my own open PRs)
-   on, authored by someone else)              │
-              │                                │
-   new commits pushed since             new comments/reviews
-   my last comment/review,              from others since
-   by someone other than me             my last pushed commit
-              │                                │
-              └───────────────┬────────────────┘
-                              ▼
-                    Outstanding / Done tabs
-                    (state fingerprinted to
-                     a point in time)
-```
+- You **reviewed** someone's PR, they pushed new commits, and it fell off your radar.
+- You **opened** a PR, someone commented, and nothing pulled it back to your attention.
 
-Two `gh api graphql` searches find every open PR in the repo where I'm either a `commenter` or the `author`. Each candidate PR's comments, inline review comments, reviews, and commits are then fetched and classified:
-
-- **Reviewing** — PRs someone else authored where I've left at least one comment or review, and a commit has landed since my latest activity that wasn't authored or committed by me.
-- **Authored** — my own PRs where a comment or review from someone else landed after my last pushed commit.
-
-Items that qualify show up in the **Outstanding** tab. Pressing Enter marks the selected item **Done**, which records the PR's current "trigger" timestamp (the newest qualifying commit/comment date). Pressing Enter again on a Done item moves it back to Outstanding. The key part: "done" isn't a permanent mute. On every fetch, a PR marked done is only kept in the Done tab if nothing newer than that recorded timestamp has shown up — if it has, the PR automatically reappears in Outstanding, because it means real new activity happened after you called it done.
+`prs` finds exactly those situations, plus brand-new PRs you haven't seen yet, and lets you triage them into simple per-PR states that persist across restarts.
 
 ## Install
 
-Today the only documented path is building from a local checkout:
+One-liner (requires [Go 1.26+](https://go.dev/dl/) and `git`):
 
 ```bash
-git clone <this repo>
-cd prs
-make install
+curl -fsSL https://raw.githubusercontent.com/cosmicbuffalo/prs/main/install.sh | sh
 ```
 
-This builds the binary and installs it to `~/.local/share/prs/bin/prs`, symlinked from `~/.local/bin/prs` (make sure that's on your `PATH`). `make uninstall` removes both.
+This clones the repo, builds the binary, and installs it to `~/.local/bin/prs`. Make sure that directory is on your `PATH`.
 
-`install.sh` also exists for a future `curl | sh`-style install, but it currently only fully supports two cases: running it from inside a local checkout (same as `make install`, just via the script), or being pointed at a remote with `PRS_REPO_URL=<git-url> sh install.sh` (it `git clone --depth=1`s that URL, builds, and installs). There's no default remote configured yet, so piping it straight from a URL without setting `PRS_REPO_URL` first will just fail with a clear error — this isn't wired up as a real one-liner install until this project has a pushed git remote to default to.
+### From source
 
-Building requires **Go 1.26+** (see `go.mod`). Check `go version` first — a system-default `go` that's older than that will fail to build this.
+```bash
+git clone https://github.com/cosmicbuffalo/prs.git
+cd prs
+make install     # builds and installs to ~/.local/bin/prs
+make uninstall   # removes it
+```
 
 ## Usage
 
-Run it from inside a git checkout with a GitHub remote `gh` recognizes:
+Run it from inside a git checkout with a GitHub remote:
 
 ```bash
 prs
 ```
 
-Or point it at a specific repo/user explicitly (works from anywhere, since it skips the `gh repo view` detection):
+Or point it at any repo/user explicitly (works from anywhere):
 
 ```bash
 prs --repo owner/name --user someone
@@ -66,25 +44,58 @@ prs --repo owner/name --user someone
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--repo` | detected via `gh repo view` in the cwd | `owner/repo` to check |
+| `--repo` | detected via `gh repo view` in the current directory | `owner/repo` to check |
 | `--user` | detected via `gh api user` | GitHub login whose activity to check against |
 
-### Keybindings
+`prs` has no credentials of its own — it shells out to the [GitHub CLI](https://cli.github.com/) (`gh`) for every piece of data. Run `gh auth status` first to make sure you're authenticated.
+
+## Tabs
+
+PRs are sorted into four tabs, switched with `←`/`→`. Only open, non-draft PRs are ever shown.
+
+| Tab | What lands here |
+|------|-----------------|
+| **Outstanding** | PRs needing your attention: ones you reviewed that got new commits, and ones you authored that got new comments/reviews. |
+| **New** | Open PRs you haven't interacted with at all yet. |
+| **Done** | PRs you've marked done with `Enter`. |
+| **Ignored** | PRs you've muted with `i`. |
+
+### How a PR is classified
+
+- **Reviewing** — a PR authored by someone else that you've commented on or reviewed, where new activity has landed since your last activity (a commit by someone other than you, or a comment/review from someone else). Lands in **Outstanding**.
+- **Authored** — your own PR where a comment or review from someone else landed after your last pushed commit. Lands in **Outstanding**.
+- **New** — an open PR you've never touched (not the author, never commented or reviewed). Lands in **New**.
+
+### How PRs move between tabs
+
+- **`Enter` marks a PR done** → it moves to **Done**. This records the PR's current activity timestamp. Done is *not* a permanent mute: on each refresh, if new activity has landed since you marked it done, the PR automatically returns to **Outstanding** (or **New**). Pressing `Enter` again on a Done PR clears it manually.
+  - For PRs you're participating in (Reviewing/Authored), *any* new comment, review, or commit reopens it.
+  - For **New** PRs, only a new **commit** reopens it — comments alone won't.
+- **`i` marks a PR ignored** → it moves to **Ignored**. Unlike Done, this is a permanent mute: it never comes back on its own, no matter what activity lands. Press `i` again on an Ignored PR to un-mute it, and it drops back into whichever tab it naturally belongs in.
+
+Ignored takes precedence over Done, which takes precedence over New/Outstanding — so a PR that's both ignored and done shows in Ignored until un-ignored.
+
+Your Done and Ignored states are saved to disk (`~/.local/state/prs/state.json`) and survive restarts.
+
+## Keybindings
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Move the cursor within the current tab |
-| `←` / `→` | Switch between Outstanding / Done |
-| `Enter` | Toggle the selected PR's done state |
+| `↑` / `↓` (or `k` / `j`) | Move the cursor within the current tab |
+| `←` / `→` (or `h` / `l`) | Switch tabs |
+| `Enter` | Toggle the selected PR's **done** state |
+| `i` | Toggle the selected PR's **ignored** state |
 | `o` | Copy the selected PR's URL to the clipboard |
-| `r` | Full re-fetch from scratch (same loading spinner as launch) |
+| `Ctrl+D` / `Ctrl+U` | Scroll the detail panel down / up |
+| `r` | Re-fetch everything from scratch |
 | `q` / `Ctrl+C` | Quit |
 
-## Dependencies / Environment
+The mouse works too: click a tab or a PR to select it, and scroll the wheel over the list or the detail panel to scroll that side.
 
-- **`gh` (GitHub CLI), installed and authenticated.** `prs` has no credentials of its own — it shells out to `gh api`, `gh api graphql`, and `gh repo view` for every piece of data it shows. Run `gh auth status` first; if `gh` isn't authenticated, `prs` will fail during its fetch and show the error in the status line rather than crashing.
-- **A repo `gh` can resolve**, i.e. a git checkout with a GitHub remote configured, unless you pass `--repo owner/name` to skip that detection entirely.
-- **Go 1.26+ to build from source.** Check `go version` — an older system `go` (this machine's default is 1.19.8) will not build it; point at a newer toolchain instead.
-- **Network access to `api.github.com`** (via `gh`) on every launch and every `r` refresh.
-- **Clipboard (`o` key):** `prs` tries a native tool appropriate to the session first — `pbcopy` on macOS, or on Linux `wl-copy` (if `$WAYLAND_DISPLAY` is set) then `xclip`/`xsel` (if `$DISPLAY` is set) — but it *always* also emits an OSC52 terminal escape sequence (auto-wrapped for tmux passthrough when `$TMUX` is set) as a reliable fallback. That fallback is what makes `o` work over SSH or in tmux with no display or clipboard tool available at all; it just depends on your terminal emulator supporting OSC52 (most modern ones do — iTerm2, Kitty, Alacritty, WezTerm, Windows Terminal, etc.) and, if you're in tmux, a reasonably modern tmux version.
-- **Local state:** `~/.local/state/prs/state.json` tracks which PRs are marked done and as of what timestamp. It's pruned automatically on every fetch (entries for PRs that no longer qualify or have closed/merged are dropped), so it won't grow unbounded. Safe to delete any time to reset all done/outstanding state.
+## Requirements
+
+- **[`gh`](https://cli.github.com/), authenticated** — the only data source; run `gh auth status` to check.
+- **A repo `gh` can resolve** — a checkout with a GitHub remote, or pass `--repo owner/name`.
+- **Go 1.26+** to build from source (check `go version`).
+- **Network access to `api.github.com`** on every launch and refresh.
+- **Clipboard (`o`)** — tries a native tool (`pbcopy`, `wl-copy`, `xclip`/`xsel`) and always also emits an OSC52 escape sequence, so copy works over SSH and inside tmux as long as your terminal supports OSC52 (most modern ones do).
