@@ -1,0 +1,91 @@
+name: release
+
+# Publish a release whenever the VERSION file changes on main (or on manual
+# dispatch). The tag is derived from VERSION as "v<version>", the release
+# notes come from the matching CHANGELOG.md section, and prebuilt binaries for
+# macOS/Linux on amd64/arm64 are attached as assets. Runs are idempotent: if a
+# release for the version's tag already exists, the workflow skips it.
+on:
+  push:
+    branches: [main]
+    paths: ['VERSION']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          if [ -z "$version" ]; then
+            echo "VERSION file is empty" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if the tag already exists
+        id: check
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.version.outputs.tag }} already exists; skipping release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes from CHANGELOG
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          notes=$(awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md)
+          if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            echo "No CHANGELOG.md entry found for version $version (expected a '## [$version]' section)." >&2
+            exit 1
+          fi
+          mkdir -p dist
+          printf '%s\n' "$notes" > dist/notes.md
+          echo "---- release notes ----"
+          cat dist/notes.md
+
+      - uses: actions/setup-go@v5
+        if: steps.check.outputs.exists == 'false'
+        with:
+          go-version-file: go.mod
+
+      - name: Build release binaries
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            goos=${target%/*}
+            goarch=${target#*/}
+            echo "building $goos/$goarch"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -ldflags "-s -w" -o dist/prs ./cmd/prs
+            tar -C dist -czf "dist/prs_${goos}_${goarch}.tar.gz" prs
+            rm dist/prs
+          done
+          ( cd dist && sha256sum *.tar.gz > checksums.txt )
+
+      - name: Publish release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: dist/notes.md
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt

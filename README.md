@@ -11,13 +11,13 @@ It watches for the two ways a PR quietly goes stale after you've looked at it:
 
 ## Install
 
-One-liner (requires [Go 1.26+](https://go.dev/dl/) and `git`):
+The one-liner downloads a prebuilt binary for your platform — **no Go toolchain required** — and installs it to `~/.local/bin/prs`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cosmicbuffalo/prs/main/install.sh | sh
 ```
 
-This clones the repo, builds the binary, and installs it to `~/.local/bin/prs`. Make sure that directory is on your `PATH`.
+Make sure `~/.local/bin` is on your `PATH`. Prebuilt binaries are published for macOS and Linux on both `amd64` and `arm64`; on anything else — or if no release has been published yet — the installer automatically falls back to building from source (which does require [Go 1.26+](https://go.dev/dl/)).
 
 ### From source
 
@@ -99,3 +99,13 @@ The mouse works too: click a tab or a PR to select it, and scroll the wheel over
 - **Go 1.26+** to build from source (check `go version`).
 - **Network access to `api.github.com`** on every launch and refresh.
 - **Clipboard (`o`)** — tries a native tool (`pbcopy`, `wl-copy`, `xclip`/`xsel`) and always also emits an OSC52 escape sequence, so copy works over SSH and inside tmux as long as your terminal supports OSC52 (most modern ones do).
+
+## Releasing
+
+Releases are automated. To cut one:
+
+1. Bump the version in [`VERSION`](VERSION) (e.g. `0.1.0` → `0.2.0`).
+2. Add a matching `## [x.y.z]` entry to [`CHANGELOG.md`](CHANGELOG.md).
+3. Merge to `main`.
+
+The [release workflow](.github/workflows/release.yml) triggers on any change to `VERSION`, tags the commit `v<version>`, cross-compiles the macOS/Linux · amd64/arm64 binaries, and publishes a GitHub release with those assets and the CHANGELOG entry as its notes. A bump without a corresponding CHANGELOG entry fails the build, and re-running for an already-released version is a no-op.
