@@ -133,7 +133,9 @@ build_from_source() {
     build_dir="$INSTALL_DIR"
   fi
 
-  ( cd "$build_dir" && "$GO" build -ldflags "-s -w" -o prs ./cmd/prs )
+  ver=$(tr -d '[:space:]' < "$build_dir/VERSION" 2>/dev/null || true)
+  [ -n "$ver" ] || ver=dev
+  ( cd "$build_dir" && "$GO" build -ldflags "-s -w -X main.version=$ver" -o prs ./cmd/prs )
   install_binary "$build_dir/prs"
 }
 

@@ -5,9 +5,11 @@ CMD := ./cmd/prs
 INSTALL_DIR := $(HOME)/.local/share/prs
 BIN_DIR := $(HOME)/.local/bin
 GO := $(shell test -x /usr/local/go/bin/go && echo /usr/local/go/bin/go || echo go)
+VERSION := $(shell tr -d '[:space:]' < VERSION)
+LDFLAGS := -s -w -X main.version=$(VERSION)
 
 build:
-	$(GO) build -ldflags "-s -w" -o $(BIN) $(CMD)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN) $(CMD)
 
 test:
 	$(GO) test ./...

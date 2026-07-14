@@ -8,6 +8,13 @@ the published release notes.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- `--version` (also `-version`) flag: prints the installed prs version and
+  exits. The version is stamped into the binary at build time from the
+  `VERSION` file.
+
 ## [0.1.1] - 2026-07-14
 
 ### Fixed

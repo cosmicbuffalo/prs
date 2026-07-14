@@ -73,7 +73,7 @@ jobs:
             goarch=${target#*/}
             echo "building $goos/$goarch"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-              go build -ldflags "-s -w" -o dist/prs ./cmd/prs
+              go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" -o dist/prs ./cmd/prs
             tar -C dist -czf "dist/prs_${goos}_${goarch}.tar.gz" prs
             rm dist/prs
           done
