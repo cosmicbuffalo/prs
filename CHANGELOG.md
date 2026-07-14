@@ -8,6 +8,19 @@ the published release notes.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-07-14
+
+### Fixed
+- The detail pane no longer pushes the top of the TUI off-screen on taller
+  windows. An un-truncated **Comments**/**Commits** section header could be
+  wider than a narrow detail column and get soft-wrapped by the enclosing box,
+  making the body one row taller than its height budget so the whole frame
+  scrolled up by a line (the bug only surfaced on taller windows, where there
+  was enough room to render down to the offending line instead of truncating
+  it away). Section-header notes are now truncated to the column width, every
+  detail-box line is hard-capped to the interior width, and the rendered frame
+  is clamped to the terminal height as a final backstop.
+
 ## [0.1.0] - 2026-07-10
 
 ### Added

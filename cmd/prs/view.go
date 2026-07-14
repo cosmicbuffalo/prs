@@ -105,7 +105,17 @@ func (m Model) View() string {
 		body = overlayBox(body, helpBox(), m.width, bodyHeight)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, topMargin, header, tabBar, tabBarSpacer, body, status, footer)
+	full := lipgloss.JoinVertical(lipgloss.Left, topMargin, header, tabBar, tabBarSpacer, body, status, footer)
+
+	// Final backstop: never emit more rows than the terminal has. Each panel
+	// already sizes itself to fit (see bodyHeight/renderDetailBox), so this
+	// only bites on a terminal too short to hold even the fixed chrome — in
+	// which case rendering the full frame would scroll the top off-screen.
+	// Clamp rather than let the frame overflow.
+	if lines := strings.Split(full, "\n"); len(lines) > m.height {
+		full = strings.Join(lines[:m.height], "\n")
+	}
+	return full
 }
 
 func (m Model) renderHeader() string {
@@ -908,13 +918,13 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	if len(shown) > maxRecentComments {
 		hidden := len(shown) - maxRecentComments
 		shown = shown[hidden:] // Detail is sorted ascending; the tail is the most recent.
-		hiddenNote = styleGray.Render(fmt.Sprintf(" (not showing %d older comments)", hidden))
+		hiddenNote = fmt.Sprintf(" (not showing %d older comments)", hidden)
 	}
 	// Shared across the Comments and Commits sections so both align their
 	// content to the same column, sized to the widest timestamp actually shown.
 	tsColWidth := maxTimestampWidth(shown, item.Commits)
 
-	scrollable = append(scrollable, styleBold.Render("Comments")+hiddenNote)
+	scrollable = append(scrollable, renderSectionHeader("Comments", hiddenNote, innerWidth))
 	if len(shown) == 0 {
 		// A NEW PR whose per-PR data is still being lazily fetched shows a
 		// loading note rather than the "none" message (see ensureNewDetail).
@@ -930,8 +940,8 @@ func (m Model) renderDetail(width, height, scroll int) string {
 
 	if len(item.Commits) > 0 {
 		scrollable = append(scrollable, "")
-		commitsNote := styleGray.Render(fmt.Sprintf(" (%d total commit(s), %d since last activity)", item.TotalCommits, len(item.Commits)))
-		scrollable = append(scrollable, styleBold.Render("Commits")+commitsNote)
+		commitsNote := fmt.Sprintf(" (%d total commit(s), %d since last activity)", item.TotalCommits, len(item.Commits))
+		scrollable = append(scrollable, renderSectionHeader("Commits", commitsNote, innerWidth))
 		for _, c := range item.Commits {
 			sha := c.SHA
 			if len(sha) > 7 {
@@ -991,6 +1001,24 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	return renderDetailBox(item.Number, width, innerWidth, maxInterior, content)
 }
 
+// renderSectionHeader renders a detail-pane section header — a bold title
+// (e.g. "Comments") followed by an optional gray note (e.g. " (not showing 3
+// older comments)") — truncated as a whole to width. The note is truncated
+// (with a trailing "…") rather than allowed to overflow, since an over-wide
+// header line would wrap inside the enclosing detail box and push the panel
+// past its height budget (see renderDetailBox's per-line cap for the backstop).
+func renderSectionHeader(title, note string, width int) string {
+	rendered := styleBold.Render(title)
+	if note == "" {
+		return rendered
+	}
+	noteBudget := width - lipgloss.Width(title)
+	if noteBudget < 1 {
+		return rendered
+	}
+	return rendered + styleGray.Render(truncateRunes(note, noteBudget))
+}
+
 // renderDetailBox draws the rounded detail box (top border with the PR number,
 // each content line padded within innerWidth, bottom border), truncating
 // content to maxInterior lines so it never overflows the panel height.
@@ -1003,7 +1031,15 @@ func renderDetailBox(number, width, innerWidth, maxInterior int, content []strin
 	b.WriteString("\n")
 	for _, line := range content {
 		b.WriteString("│ ")
-		b.WriteString(padVisible(line, innerWidth))
+		// Hard-cap each line to the box's interior width before padding.
+		// padVisible only pads (it assumes the line already fits); a line
+		// wider than innerWidth would make the assembled "│ … │" row exceed
+		// the panel width, get soft-wrapped by the enclosing lipgloss box in
+		// renderBody*, and push the whole body one row past its height budget
+		// — scrolling the top of the TUI off-screen. MaxWidth is display-
+		// width-aware and ANSI-safe, matching the list column's own cap.
+		capped := lipgloss.NewStyle().MaxWidth(innerWidth).Render(line)
+		b.WriteString(padVisible(capped, innerWidth))
 		b.WriteString(" │\n")
 	}
 	b.WriteString(renderDetailBottomBorder(width))
