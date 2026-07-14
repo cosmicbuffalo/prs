@@ -100,3 +100,75 @@ func TestRenderSectionHeaderTruncates(t *testing.T) {
 		t.Errorf("a fitting note should be shown in full, got %q", full)
 	}
 }
+
+// TestHorizontalStickyHeaderIsOnlyLinkTitleBaseline verifies that in the
+// horizontal layout only the PR link, title, and baseline line stay pinned —
+// the PR Details / Review Status summary scrolls with the comment thread, so a
+// PR with a long participant/review list can't make the panel impossible to
+// scroll on a short window.
+func TestHorizontalStickyHeaderIsOnlyLinkTitleBaseline(t *testing.T) {
+	var detail []DetailLine
+	for i := 0; i < 20; i++ {
+		text := "a comment body here"
+		if i == 19 {
+			text = "ZZZLASTCOMMENT" // distinctive marker in the most-recent comment
+		}
+		detail = append(detail, DetailLine{
+			Date:  time.Now().Add(-time.Duration(20-i) * time.Hour),
+			Login: "someuser",
+			Kind:  "comment",
+			Text:  text,
+		})
+	}
+	var revs []ReviewEvent
+	for i := 0; i < 5; i++ {
+		revs = append(revs, ReviewEvent{Login: fmt.Sprintf("reviewer%d", i), State: ReviewApproved, Date: time.Now()})
+	}
+	item := Item{
+		Key:               "o/r#2",
+		Number:            2,
+		Title:             "A concise PR title",
+		URL:               "https://x/o/r/pull/2",
+		Section:           SectionReviewing,
+		BaselineLabel:     "your last activity",
+		Baseline:          time.Now().Add(-48 * time.Hour),
+		Detail:            detail,
+		Reviewers:         revs,
+		ParticipantLogins: []string{"alice", "bob", "carol", "dave", "erin", "frank", "grace"},
+		ParticipantCount:  9,
+		Author:            "author",
+		TotalComments:     20,
+	}
+
+	m := Model{keys: DefaultKeyMap(), width: 120, height: 22, hasData: true, activeTab: tabOutstanding, layout: layoutHorizontal}
+	m.items[tabOutstanding] = []Item{item}
+
+	const url = "https://x/o/r/pull/2"
+	top := m.renderDetail(func() int { _, r := m.columnWidths(); return r }(), m.bodyHeight(), 0)
+	// A large scroll clamps to the bottom of the scroll region.
+	bottom := m.renderDetail(func() int { _, r := m.columnWidths(); return r }(), m.bodyHeight(), 1000)
+
+	// The link stays pinned at both scroll extremes.
+	if !strings.Contains(top, url) {
+		t.Errorf("URL should be pinned at scroll top")
+	}
+	if !strings.Contains(bottom, url) {
+		t.Errorf("URL should stay pinned after scrolling (it is the sticky header)")
+	}
+	// PR Details is part of the scroll region now: visible at the top, gone once
+	// scrolled to the bottom.
+	if !strings.Contains(top, "PR Details") {
+		t.Errorf("PR Details should be visible at scroll top")
+	}
+	if strings.Contains(bottom, "PR Details") {
+		t.Errorf("PR Details should scroll away (it must no longer be pinned)")
+	}
+	// The comment thread is reachable by scrolling: the most-recent comment
+	// isn't visible at the top but is after scrolling down.
+	if strings.Contains(top, "ZZZLASTCOMMENT") {
+		t.Errorf("the last comment should not be visible at scroll top")
+	}
+	if !strings.Contains(bottom, "ZZZLASTCOMMENT") {
+		t.Errorf("the last comment should be reachable by scrolling")
+	}
+}

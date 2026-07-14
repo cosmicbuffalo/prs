@@ -892,9 +892,11 @@ func (m Model) renderDetail(width, height, scroll int) string {
 		return renderDetailBox(item.Number, width, innerWidth, maxInterior, lines)
 	}
 
-	// Sticky header: URL, wrapped title, baseline, Review Status (if any),
-	// and a blank spacer — always shown at the top of the panel regardless
-	// of scroll position. Only Comments/Commits below it actually scroll.
+	// Sticky header (horizontal layout only): the PR link, wrapped title, and
+	// the baseline "last activity" line stay pinned at the top regardless of
+	// scroll position. Everything below — PR Details, Review Status, and the
+	// comment/commit thread — scrolls, so a PR with a long participant or
+	// review list can't crowd the scroll region out of a short panel.
 	var header []string
 	header = append(header, styleOrange.Render(truncateRunes(item.URL, innerWidth)))
 	titleLines := strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(item.Title), "\n")
@@ -909,10 +911,14 @@ func (m Model) renderDetail(width, height, scroll int) string {
 		header = append(header, styleGray.Render(truncateRunes(baselineText, innerWidth)))
 	}
 	header = append(header, "")
-	header = append(header, m.renderSummaryRow(item, innerWidth)...)
-	header = append(header, "")
 
+	// Scrollable region: the PR Details / Review Status summary first, then the
+	// comment/commit thread below it. In vertical layout this is concatenated
+	// back onto the header (nothing is pinned there — see below).
 	var scrollable []string
+	scrollable = append(scrollable, m.renderSummaryRow(item, innerWidth)...)
+	scrollable = append(scrollable, "")
+
 	shown := item.Detail
 	var hiddenNote string
 	if len(shown) > maxRecentComments {
@@ -956,8 +962,9 @@ func (m Model) renderDetail(width, height, scroll int) string {
 
 	// In vertical layout the whole panel scrolls together (no sticky header),
 	// since the shorter panel makes a pinned header eat too much of the
-	// visible area; in horizontal layout the header (URL/title/summary) stays
-	// pinned and only the Comments/Commits below it scroll.
+	// visible area; in horizontal layout only the PR link/title/baseline stay
+	// pinned (see header above) and everything below it — PR Details, Review
+	// Status, and the comment/commit thread — scrolls.
 	if m.layout == layoutVertical {
 		full := append(append([]string{}, header...), scrollable...)
 		maxScroll := len(full) - maxInterior

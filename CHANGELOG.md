@@ -15,6 +15,13 @@ and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exits. The version is stamped into the binary at build time from the
   `VERSION` file.
 
+### Changed
+- In the horizontal layout, only the PR link, title, and baseline line stay
+  pinned at the top of the detail pane; the PR Details and Review Status
+  sections now scroll along with the comment/commit thread. Previously they
+  were pinned too, which could make the detail pane impossible to scroll on a
+  short window when a PR had a long participant or review list.
+
 ## [0.1.1] - 2026-07-14
 
 ### Fixed
