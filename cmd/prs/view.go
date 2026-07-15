@@ -896,7 +896,9 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	// the baseline "last activity" line stay pinned at the top regardless of
 	// scroll position. Everything below — PR Details, Review Status, and the
 	// comment/commit thread — scrolls, so a PR with a long participant or
-	// review list can't crowd the scroll region out of a short panel.
+	// review list can't crowd the scroll region out of a short panel. The blank
+	// line separating this pinned header from the scroll area is added during
+	// composition (see composeDetail), where it doubles as the "↑ (more)" hint.
 	var header []string
 	header = append(header, styleOrange.Render(truncateRunes(item.URL, innerWidth)))
 	titleLines := strings.Split(lipgloss.NewStyle().Width(innerWidth).Render(item.Title), "\n")
@@ -910,7 +912,6 @@ func (m Model) renderDetail(width, height, scroll int) string {
 		baselineText := item.BaselineLabel + ": " + relativeTime(item.Baseline)
 		header = append(header, styleGray.Render(truncateRunes(baselineText, innerWidth)))
 	}
-	header = append(header, "")
 
 	// Scrollable region: the PR Details / Review Status summary first, then the
 	// comment/commit thread below it. In vertical layout this is concatenated
@@ -966,53 +967,60 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	// pinned (see header above) and everything below it — PR Details, Review
 	// Status, and the comment/commit thread — scrolls.
 	if m.layout == layoutVertical {
-		full := append(append([]string{}, header...), scrollable...)
-		content := windowWithScrollHints(full, scroll, maxInterior, innerWidth)
+		full := append(append([]string{}, header...), "")
+		full = append(full, scrollable...)
+		content := composeDetail(nil, full, scroll, maxInterior, innerWidth)
 		return renderDetailBox(item.Number, width, innerWidth, maxInterior, content)
 	}
 
-	available := maxInterior - len(header)
-	if available < 0 {
-		available = 0
-	}
-	windowed := windowWithScrollHints(scrollable, scroll, available, innerWidth)
-
-	content := append(header, windowed...)
+	content := composeDetail(header, scrollable, scroll, maxInterior, innerWidth)
 	return renderDetailBox(item.Number, width, innerWidth, maxInterior, content)
 }
 
-// windowWithScrollHints returns the height visible rows of lines starting at
-// the scroll offset (clamped to a valid range here), the detail-pane analog of
-// the PR list's windowing. When everything already fits (len(lines) <= height)
-// the lines are returned unchanged with no hints. When the content overflows,
-// the top and bottom rows are reserved for centered "(more)" scroll hints —
-// "↑ (more)" on the first row when content is hidden above, "↓ (more)" on the
-// last row when content is hidden below — so no content line is ever hidden
-// behind a hint and the visible row count stays stable while scrolling. Each
-// hint blanks out (rather than shifting the layout) at its scroll extreme,
-// matching the list's reserved-line behavior. The count is dropped in favor of
-// a plain "(more)" since an exact hidden-line count is less meaningful for
-// free-flowing text than for the list's discrete entries.
-func windowWithScrollHints(lines []string, scroll, height, width int) []string {
-	if height < 1 {
-		return nil
-	}
-	if len(lines) <= height {
-		return lines // everything fits — no scrolling, no hints
+// composeDetail lays out the detail box interior: pinned lines stay at the top
+// (empty in vertical layout, where everything scrolls), followed by the scroll
+// region built from scrollable, sized to fit maxInterior rows from the (clamped
+// here) scroll offset. It's the detail-pane analog of the PR list's windowing,
+// with a plain "(more)" label since an exact hidden-line count is less
+// meaningful for free-flowing text than for the list's discrete entries.
+//
+// A single separator line sits between the pinned header and the scroll region.
+// It's blank normally but shows a centered "↑ (more)" when content is scrolled
+// off the top — so the up-hint reuses that separator rather than adding a blank
+// line above itself. When there's no pinned header (vertical layout) the
+// separator only materializes as the up-hint (no blank row is spent when at the
+// top). When content overflows, the last interior row shows "↓ (more)", blank
+// once scrolled to the bottom. Neither hint ever hides a content line, and the
+// visible row count stays stable while scrolling.
+func composeDetail(pinned, scrollable []string, scroll, maxInterior, width int) []string {
+	out := append([]string{}, pinned...)
+
+	avail := maxInterior - len(pinned)
+	if avail < 1 {
+		return out // no room for a scroll region
 	}
 
-	// Content overflows. Reserve a row top and bottom for the hints, unless the
-	// panel is too short to spare them (then just window with no hints).
-	reserve := 2
-	if height < 3 {
-		reserve = 0
+	// A pinned header needs a blank line separating it from the content even
+	// when nothing scrolls; with no header, the content starts at the top.
+	sepInFits := len(pinned) > 0
+	fitsBudget := avail
+	if sepInFits {
+		fitsBudget = avail - 1
 	}
-	contentRows := height - reserve
+	if len(scrollable) <= fitsBudget {
+		if sepInFits {
+			out = append(out, "")
+		}
+		return append(out, scrollable...)
+	}
 
-	maxScroll := len(lines) - contentRows
-	if maxScroll < 0 {
-		maxScroll = 0
+	// Content overflows: one row for the separator/up-hint, one for the
+	// bottom down-hint.
+	contentRows := avail - 2
+	if contentRows < 1 {
+		contentRows = 1
 	}
+	maxScroll := len(scrollable) - contentRows
 	if scroll > maxScroll {
 		scroll = maxScroll
 	}
@@ -1020,25 +1028,21 @@ func windowWithScrollHints(lines []string, scroll, height, width int) []string {
 		scroll = 0
 	}
 	end := scroll + contentRows
-	if end > len(lines) {
-		end = len(lines)
-	}
-	if reserve == 0 {
-		return lines[scroll:end]
+	if end > len(scrollable) {
+		end = len(scrollable)
 	}
 
-	up := ""
+	sep := ""
 	if scroll > 0 {
-		up = centerGray("↑ (more)", width)
+		sep = centerGray("↑ (more)", width)
 	}
-	down := ""
-	if end < len(lines) {
-		down = centerGray("↓ (more)", width)
+	out = append(out, sep)
+	out = append(out, scrollable[scroll:end]...)
+	if end < len(scrollable) {
+		out = append(out, centerGray("↓ (more)", width))
+	} else {
+		out = append(out, "")
 	}
-	out := make([]string, 0, height)
-	out = append(out, up)
-	out = append(out, lines[scroll:end]...)
-	out = append(out, down)
 	return out
 }
 
