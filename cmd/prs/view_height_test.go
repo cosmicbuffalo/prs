@@ -172,3 +172,53 @@ func TestHorizontalStickyHeaderIsOnlyLinkTitleBaseline(t *testing.T) {
 		t.Errorf("the last comment should be reachable by scrolling")
 	}
 }
+
+// TestWindowWithScrollHints verifies the detail-pane scroll hints: none when
+// content fits, a down hint at the top, both in the middle, and only an up hint
+// at the bottom — always keeping the visible row count stable while overflowing.
+func TestWindowWithScrollHints(t *testing.T) {
+	const width = 40
+	hasUp := func(rows []string) bool { return len(rows) > 0 && strings.Contains(rows[0], "↑ (more)") }
+	hasDown := func(rows []string) bool { return len(rows) > 0 && strings.Contains(rows[len(rows)-1], "↓ (more)") }
+
+	// Fits entirely: returned unchanged, no hints, no reserved rows.
+	fits := []string{"a", "b", "c"}
+	if got := windowWithScrollHints(fits, 0, 10, width); len(got) != 3 || hasUp(got) || hasDown(got) {
+		t.Errorf("content that fits should be returned as-is with no hints, got %d rows up=%v down=%v", len(got), hasUp(got), hasDown(got))
+	}
+
+	// Overflows: 20 lines into a 10-row region.
+	lines := make([]string, 20)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line-%d", i)
+	}
+
+	top := windowWithScrollHints(lines, 0, 10, width)
+	if len(top) != 10 {
+		t.Errorf("overflowing window should be exactly height rows, got %d", len(top))
+	}
+	if hasUp(top) {
+		t.Errorf("no up hint expected at the top")
+	}
+	if !hasDown(top) {
+		t.Errorf("down hint expected at the top (more content below)")
+	}
+
+	mid := windowWithScrollHints(lines, 5, 10, width)
+	if !hasUp(mid) || !hasDown(mid) {
+		t.Errorf("both hints expected in the middle, got up=%v down=%v", hasUp(mid), hasDown(mid))
+	}
+
+	// A very large scroll clamps to the bottom: up hint only.
+	bot := windowWithScrollHints(lines, 100000, 10, width)
+	if !hasUp(bot) {
+		t.Errorf("up hint expected at the bottom (more content above)")
+	}
+	if hasDown(bot) {
+		t.Errorf("no down hint expected at the bottom")
+	}
+	// The final content line must be reachable at the bottom.
+	if !strings.Contains(strings.Join(bot, "\n"), "line-19") {
+		t.Errorf("the last content line should be visible at the bottom")
+	}
+}

@@ -14,6 +14,10 @@ and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--version` (also `-version`) flag: prints the installed prs version and
   exits. The version is stamped into the binary at build time from the
   `VERSION` file.
+- Scroll hints in the detail pane: when its contents overflow the panel, a
+  centered `↑ (more)` / `↓ (more)` appears at the top/bottom of the scroll
+  region to signal hidden content in that direction, each disappearing once
+  you scroll to that end (mirroring the PR list's scroll indicators).
 
 ### Changed
 - In the horizontal layout, only the PR link, title, and baseline line stay

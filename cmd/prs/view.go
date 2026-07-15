@@ -967,28 +967,49 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	// Status, and the comment/commit thread — scrolls.
 	if m.layout == layoutVertical {
 		full := append(append([]string{}, header...), scrollable...)
-		maxScroll := len(full) - maxInterior
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		if scroll > maxScroll {
-			scroll = maxScroll
-		}
-		if scroll < 0 {
-			scroll = 0
-		}
-		end := scroll + maxInterior
-		if end > len(full) {
-			end = len(full)
-		}
-		return renderDetailBox(item.Number, width, innerWidth, maxInterior, full[scroll:end])
+		content := windowWithScrollHints(full, scroll, maxInterior, innerWidth)
+		return renderDetailBox(item.Number, width, innerWidth, maxInterior, content)
 	}
 
 	available := maxInterior - len(header)
 	if available < 0 {
 		available = 0
 	}
-	maxScroll := len(scrollable) - available
+	windowed := windowWithScrollHints(scrollable, scroll, available, innerWidth)
+
+	content := append(header, windowed...)
+	return renderDetailBox(item.Number, width, innerWidth, maxInterior, content)
+}
+
+// windowWithScrollHints returns the height visible rows of lines starting at
+// the scroll offset (clamped to a valid range here), the detail-pane analog of
+// the PR list's windowing. When everything already fits (len(lines) <= height)
+// the lines are returned unchanged with no hints. When the content overflows,
+// the top and bottom rows are reserved for centered "(more)" scroll hints —
+// "↑ (more)" on the first row when content is hidden above, "↓ (more)" on the
+// last row when content is hidden below — so no content line is ever hidden
+// behind a hint and the visible row count stays stable while scrolling. Each
+// hint blanks out (rather than shifting the layout) at its scroll extreme,
+// matching the list's reserved-line behavior. The count is dropped in favor of
+// a plain "(more)" since an exact hidden-line count is less meaningful for
+// free-flowing text than for the list's discrete entries.
+func windowWithScrollHints(lines []string, scroll, height, width int) []string {
+	if height < 1 {
+		return nil
+	}
+	if len(lines) <= height {
+		return lines // everything fits — no scrolling, no hints
+	}
+
+	// Content overflows. Reserve a row top and bottom for the hints, unless the
+	// panel is too short to spare them (then just window with no hints).
+	reserve := 2
+	if height < 3 {
+		reserve = 0
+	}
+	contentRows := height - reserve
+
+	maxScroll := len(lines) - contentRows
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
@@ -998,14 +1019,27 @@ func (m Model) renderDetail(width, height, scroll int) string {
 	if scroll < 0 {
 		scroll = 0
 	}
-	end := scroll + available
-	if end > len(scrollable) {
-		end = len(scrollable)
+	end := scroll + contentRows
+	if end > len(lines) {
+		end = len(lines)
 	}
-	scrollable = scrollable[scroll:end]
+	if reserve == 0 {
+		return lines[scroll:end]
+	}
 
-	content := append(header, scrollable...)
-	return renderDetailBox(item.Number, width, innerWidth, maxInterior, content)
+	up := ""
+	if scroll > 0 {
+		up = centerGray("↑ (more)", width)
+	}
+	down := ""
+	if end < len(lines) {
+		down = centerGray("↓ (more)", width)
+	}
+	out := make([]string, 0, height)
+	out = append(out, up)
+	out = append(out, lines[scroll:end]...)
+	out = append(out, down)
+	return out
 }
 
 // renderSectionHeader renders a detail-pane section header — a bold title
