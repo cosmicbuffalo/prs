@@ -8,6 +8,28 @@ the published release notes.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.3] - 2026-08-20
+
+### Changed
+- Acting on a PR with `Enter`/`i` now auto-advances the cursor to the next PR,
+  so repeated taps walk down the list. When you act on the last PR, the cursor
+  holds and falls back to the previous PR once the move commits.
+- Telegraphed moves can now stack: tapping `i i i` stages three moves that each
+  commit after their own delay, instead of a new move force-committing the
+  previous one. Cancel/redirect act on the PR under the cursor, so to undo or
+  change a staged move, navigate back to that PR first.
+
+### Fixed
+- OSC52 URL copy (`o`) now works inside tmux when `allow-passthrough` is off
+  (the default since tmux 3.3). Previously the passthrough-wrapped sequence was
+  silently swallowed while the status line still reported success. The emission
+  mode is now chosen from tmux's actual `set-clipboard`/`allow-passthrough`
+  options.
+- The list cursor no longer silently lands on a different PR when a telegraphed
+  toggle commits. The cursor is now locked to its PR across reclassification and
+  background refreshes, falling back to clamping the old index only when the PR
+  it was on has left the tab.
+
 ## [0.1.2] - 2026-07-15
 
 ### Added
