@@ -656,6 +656,22 @@ func (m Model) applyNewDetail(d NewDetail) Model {
 //   - New (SectionNew) — a PR the user hasn't touched at all.
 //   - Outstanding — everything else (Reviewing/Authored with new activity).
 func (m *Model) classify(items []Item) {
+	// Remember the PR each tab's cursor is currently sitting on, so after the
+	// reshuffle below the cursor stays locked to that *element* rather than to a
+	// now-stale index. This matters when the list changes out from under the
+	// cursor — e.g. a telegraphed Enter/i toggle commits and its PR leaves the
+	// tab, or a background refresh reorders things: without this, the cursor
+	// keeps its index and silently ends up on a different PR. When the PR the
+	// cursor was on has itself left the tab (its key won't be found below),
+	// restoreCursorToKey falls back to clamping the old index, so the next PR
+	// slides in under the cursor.
+	prevSel := [4]string{}
+	for tab := range m.items {
+		if c := m.cursors[tab]; c >= 0 && c < len(m.items[tab]) {
+			prevSel[tab] = m.items[tab][c].Key
+		}
+	}
+
 	outstanding := make([]Item, 0, len(items))
 	newItems := make([]Item, 0, len(items))
 	done := make([]Item, 0, len(items))
@@ -680,9 +696,25 @@ func (m *Model) classify(items []Item) {
 	m.items[tabIgnored] = ignored
 
 	for _, tab := range [4]int{tabOutstanding, tabNew, tabDone, tabIgnored} {
-		m.clampCursor(tab)
+		m.restoreCursorToKey(tab, prevSel[tab])
 		m.clampListScroll(tab)
 	}
+}
+
+// restoreCursorToKey points tab's cursor at the entry whose Key matches key,
+// keeping the cursor locked to that PR across a reshuffle. If key is empty or
+// the PR is no longer in the tab (e.g. it just moved to another tab), the
+// previous index is kept, clamped back into range.
+func (m *Model) restoreCursorToKey(tab int, key string) {
+	if key != "" {
+		for i, it := range m.items[tab] {
+			if it.Key == key {
+				m.cursors[tab] = i
+				return
+			}
+		}
+	}
+	m.clampCursor(tab)
 }
 
 // clampCursor keeps the given tab's cursor within [0, len-1] (or 0 if empty).

@@ -221,6 +221,58 @@ func TestTransitionIgnoredToDoneClearsIgnored(t *testing.T) {
 	}
 }
 
+// TestCursorFollowsElementWhenMovedDuringTransition covers the case the cursor
+// is moved to another PR while an Enter/i toggle is telegraphing: once the
+// toggled PR leaves the tab, the cursor should stay on the PR it was moved to,
+// not on whatever index that PR used to sit at.
+func TestCursorFollowsElementWhenMovedDuringTransition(t *testing.T) {
+	a := outstandingItem("owner/repo#1")
+	b := outstandingItem("owner/repo#2")
+	c := outstandingItem("owner/repo#3")
+	m := testModel(t, []Item{a, b, c})
+	m.activeTab = tabOutstanding
+
+	// Enter on A (index 0) starts a telegraphed move to Done; A stays in place.
+	m.cursors[tabOutstanding] = 0
+	tm, _ := m.startTransition(transitionDone)
+	m = tm.(Model)
+
+	// During the delay the user moves the cursor down to B (index 1).
+	m.moveCursor(1)
+	if sel, _ := m.selectedItem(); sel.Key != b.Key {
+		t.Fatalf("setup: expected cursor on B before commit, got %q", sel.Key)
+	}
+
+	// A commits and leaves the tab; B shifts up from index 1 to index 0. The
+	// cursor should follow B rather than stay at index 1 (which is now C).
+	m = advanceTransition(t, m)
+	if got := tabOf(m, a.Key); got != tabDone {
+		t.Fatalf("expected A in Done after commit, found in tab %d", got)
+	}
+	if sel, ok := m.selectedItem(); !ok || sel.Key != b.Key {
+		t.Fatalf("cursor should stay on B after A leaves, got %q (ok=%v)", sel.Key, ok)
+	}
+}
+
+// TestCursorHoldsIndexWhenItsElementLeaves covers the plain case: the cursor is
+// on the PR being toggled and isn't moved during the telegraph. When that PR
+// leaves, the cursor keeps its position so the next PR slides in under it.
+func TestCursorHoldsIndexWhenItsElementLeaves(t *testing.T) {
+	a := outstandingItem("owner/repo#1")
+	b := outstandingItem("owner/repo#2")
+	m := testModel(t, []Item{a, b})
+	m.activeTab = tabOutstanding
+
+	m.cursors[tabOutstanding] = 0 // on A
+	tm, _ := m.startTransition(transitionDone)
+	m = tm.(Model)
+
+	m = advanceTransition(t, m)
+	if sel, ok := m.selectedItem(); !ok || sel.Key != b.Key {
+		t.Fatalf("expected the next PR (B) to slide under the cursor, got %q (ok=%v)", sel.Key, ok)
+	}
+}
+
 func TestTransitionOnDifferentPRCommitsPrior(t *testing.T) {
 	a := outstandingItem("owner/repo#1")
 	b := outstandingItem("owner/repo#2")
