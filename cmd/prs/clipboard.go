@@ -77,13 +77,62 @@ func tryNativeCopy(text string) (tool string, attempted bool) {
 	return tool, true
 }
 
+// tmuxShow reads a single global tmux option value (best-effort). It returns
+// the trimmed value, or "" on any error (tmux missing, option unset, timeout).
+func tmuxShow(option string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), nativeCopyTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "tmux", "show", "-gv", option).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// osc52Mode decides how to emit the OSC52 sequence given whether we're running
+// inside tmux and the relevant tmux options. The tmux option values are only
+// consulted when inTmux is true.
+//
+// The subtlety this exists to handle: tmux gates DCS passthrough behind its
+// allow-passthrough option (added in tmux 3.3, default off). Blindly wrapping
+// every sequence in tmux passthrough — as go-osc52's .Tmux() does — means that
+// on any tmux ≥3.3 with the default config, tmux silently swallows the whole
+// sequence and nothing is copied. So:
+//
+//   - set-clipboard on|external: tmux itself intercepts a *plain* OSC52
+//     sequence and forwards it to the outer terminal. Send it plain; wrapping
+//     it in passthrough would bypass (and defeat) that handling.
+//   - otherwise, allow-passthrough on|all: tmux won't forward OSC52 for us, but
+//     it will pass a DCS-wrapped sequence straight through to the outer
+//     terminal, so use passthrough mode.
+//   - otherwise: send it plain as a best effort. Passthrough would just be
+//     swallowed, so plain is no worse and works if tmux forwards after all.
+func osc52Mode(inTmux bool, setClipboard, allowPassthrough string) osc52.Mode {
+	if !inTmux {
+		return osc52.DefaultMode
+	}
+	switch setClipboard {
+	case "on", "external":
+		return osc52.DefaultMode
+	}
+	if allowPassthrough == "on" || allowPassthrough == "all" {
+		return osc52.TmuxMode
+	}
+	return osc52.DefaultMode
+}
+
 // Copy sends text to the system/terminal clipboard. It first tries a native
 // tool appropriate to the current session (pbcopy on macOS; wl-copy if
 // $WAYLAND_DISPLAY is set and wl-copy exists; xclip or xsel if $DISPLAY is
 // set and one of them exists), and ALWAYS additionally emits an OSC52
-// sequence (which go-osc52 will wrap for tmux passthrough automatically when
-// $TMUX is set) so it reaches the user's real terminal clipboard over
-// SSH/tmux regardless of whether a native tool was available or worked.
+// sequence so it reaches the user's real terminal clipboard over SSH/tmux
+// regardless of whether a native tool was available or worked.
+//
+// Inside tmux, the sequence is only wrapped in DCS passthrough when tmux
+// actually needs it (see osc52Mode); with tmux's common set-clipboard=on
+// config a plain sequence is sent and tmux forwards it to the outer terminal.
+//
 // Returns a short human-readable description of what was attempted, for
 // display in the TUI's status line (e.g. "Copied to clipboard"). Returns a
 // non-nil error only if the OSC52 write itself failed (e.g. couldn't write
@@ -94,7 +143,7 @@ func Copy(text string) (string, error) {
 
 	seq := osc52.New(text)
 	if os.Getenv("TMUX") != "" {
-		seq = seq.Tmux()
+		seq = seq.Mode(osc52Mode(true, tmuxShow("set-clipboard"), tmuxShow("allow-passthrough")))
 	}
 	if _, err := seq.WriteTo(os.Stdout); err != nil {
 		return "", fmt.Errorf("write OSC52 sequence: %w", err)
