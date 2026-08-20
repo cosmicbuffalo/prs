@@ -72,10 +72,12 @@ const (
 
 // transition is an in-flight, not-yet-committed Enter/i toggle being
 // telegraphed to the user (so they can watch it, cancel it by pressing the
-// same key again, or redirect it by pressing the other key). Exactly one is
-// active at a time. epoch guards against stale tick timers after a
-// cancel/redirect: only a tick whose epoch matches the live transition's is
-// acted on.
+// same key again on that PR, or redirect it by pressing the other key). Any
+// number can be in flight at once — at most one per PR — so tapping the key
+// down a list stacks several staged moves that then commit one by one (see
+// Model.transitions). epoch is a unique id (see Model.transitionEpoch) that
+// guards against stale tick timers: only a tick whose epoch still matches a
+// live transition is acted on.
 type transition struct {
 	key  string
 	kind transitionKind
@@ -155,10 +157,14 @@ type Model struct {
 	// always opens scrolled to the top.
 	detailScroll int
 
-	// transition holds the currently-telegraphing Enter/i toggle, if any (see
-	// the transition type). transitionEpoch is bumped on every start/cancel/
-	// redirect so stale phase-tick timers can be ignored.
-	transition      *transition
+	// transitions holds every Enter/i toggle currently telegraphing, if any
+	// (see the transition type). Several PRs can be staged at once — tapping the
+	// key down a list stacks one transition per PR, each committing after its
+	// own delay. transitionEpoch is a monotonic id allocator: every staged
+	// transition gets a unique epoch so a stale phase-tick timer (from a
+	// since-cancelled, -redirected, or already-committed transition) can be
+	// matched by epoch and ignored.
+	transitions     []*transition
 	transitionEpoch int
 
 	// statusMsg is the transient one-line message shown above the footer

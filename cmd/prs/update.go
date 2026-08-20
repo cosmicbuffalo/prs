@@ -110,10 +110,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		m.store = msg.store
-		// A refresh reclassifies everything; a mid-flight telegraphed toggle
-		// would be pointing at now-stale data, so drop it.
-		m.transition = nil
-		m.transitionEpoch++
+		// A refresh reclassifies everything; any mid-flight telegraphed toggles
+		// would be pointing at now-stale data, so drop them. Their pending tick
+		// timers find no matching epoch and are ignored.
+		m.transitions = nil
 		// A refresh rebuilds NEW items from scratch (no detail), so any lazily
 		// fetched detail is gone — clear the tracking so it re-fetches on the
 		// next select.
@@ -144,17 +144,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case transitionTickMsg:
-		if m.transition == nil || msg.epoch != m.transition.epoch {
-			return m, nil // stale tick from a cancelled/redirected transition
+		t := m.transitionByEpoch(msg.epoch)
+		if t == nil {
+			return m, nil // stale tick from a cancelled/redirected/committed transition
 		}
-		m.transition.phase++
-		if m.transition.phase >= phaseCommit {
-			t := m.transition
-			m.transition = nil
+		t.phase++
+		if t.phase >= phaseCommit {
+			m.dropTransition(t.epoch)
 			m.applyTransition(t)
 			return m, nil
 		}
-		return m, transitionTickCmd(m.transition.epoch)
+		return m, transitionTickCmd(t.epoch)
 
 	case tea.KeyMsg:
 		tm, cmd := m.handleKey(msg)
@@ -271,8 +271,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = true
 		m.err = nil
-		m.transition = nil
-		m.transitionEpoch++
+		m.transitions = nil
 		return m, tea.Batch(m.spinner.Tick, resolveRepoUserCmd(m.repoOverride, m.userOverride))
 	}
 
@@ -496,6 +495,50 @@ func (m *Model) applyToggle(item Item, kind transitionKind) error {
 	return m.store.MarkDone(item)
 }
 
+// transitionByKey returns the pending transition telegraphing the PR with the
+// given key, or nil if that PR has none staged. At most one transition exists
+// per PR (startTransition drops any prior one for a PR before staging a new).
+func (m *Model) transitionByKey(key string) *transition {
+	for _, t := range m.transitions {
+		if t.key == key {
+			return t
+		}
+	}
+	return nil
+}
+
+// transitionByEpoch returns the pending transition with the given epoch, or nil
+// if it's since been cancelled, redirected, or committed — used to match a
+// phase-tick timer against a still-live transition.
+func (m *Model) transitionByEpoch(epoch int) *transition {
+	for _, t := range m.transitions {
+		if t.epoch == epoch {
+			return t
+		}
+	}
+	return nil
+}
+
+// dropTransition removes the pending transition with the given epoch, if any.
+func (m *Model) dropTransition(epoch int) {
+	for i, t := range m.transitions {
+		if t.epoch == epoch {
+			m.transitions = append(m.transitions[:i], m.transitions[i+1:]...)
+			return
+		}
+	}
+}
+
+// dropTransitionKey removes the pending transition for the given PR key, if any.
+func (m *Model) dropTransitionKey(key string) {
+	for i, t := range m.transitions {
+		if t.key == key {
+			m.transitions = append(m.transitions[:i], m.transitions[i+1:]...)
+			return
+		}
+	}
+}
+
 // startTransition handles an Enter (transitionDone) or i (transitionIgnore)
 // press on the selected PR. It resolves where that press sends the PR — into
 // Done/Ignored, or back out to its natural bucket if it's already there (see
@@ -505,72 +548,83 @@ func (m *Model) applyToggle(item Item, kind transitionKind) error {
 // would visibly move, e.g. un-doing an intrinsically Quiet PR), it's applied
 // instantly with no telegraph.
 //
-// While a transition is in flight: pressing the same key again on the same PR
-// cancels it; pressing the other key redirects it toward the other
-// destination (restarting the animation). A transition in flight on a
-// different PR is committed immediately before this one is acted on, so only
-// one is ever live at a time.
+// After acting, the cursor advances to the next PR so repeatedly tapping the
+// key walks down the list, staging each PR's move as it goes. Staged moves
+// stack: any number can telegraph at once (one per PR), each committing after
+// its own delay — acting on one PR never forces a pending move on another to
+// commit early. Pressing the same key again on a PR that's already staged
+// cancels its pending move (no advance); pressing the other key redirects it
+// toward the other destination.
 func (m Model) startTransition(kind transitionKind) (tea.Model, tea.Cmd) {
 	item, ok := m.selectedItem()
 	if !ok || m.store == nil {
 		return m, nil
 	}
 
-	// Same PR already telegraphing + same key ⇒ cancel the pending move.
-	if m.transition != nil && m.transition.key == item.Key && m.transition.kind == kind {
-		m.transition = nil
-		m.transitionEpoch++
-		return m, nil
+	// This PR is already staged: the same key cancels its pending move (leaving
+	// the cursor put, since the user is backing out); the other key redirects it
+	// — drop the old one and re-stage toward the new destination resolved below.
+	if t := m.transitionByKey(item.Key); t != nil {
+		if t.kind == kind {
+			m.dropTransitionKey(item.Key)
+			return m, nil
+		}
+		m.dropTransitionKey(item.Key)
 	}
-
-	// A transition in flight on a *different* PR is committed now (its intended
-	// end state) before we act on this one. A same-PR transition (i.e. a
-	// redirect via the other key) is instead discarded in favor of the new
-	// destination resolved below.
-	if m.transition != nil && m.transition.key != item.Key {
-		m.applyTransition(m.transition)
-	}
-	m.transition = nil
 
 	destTab := m.destTabFor(item, kind)
 
 	// Destination is the tab already in view — nothing would visibly move, so
-	// apply the toggle instantly with no telegraph.
+	// apply the toggle instantly with no telegraph, then advance to the next PR.
 	if destTab == m.activeTab {
-		m.transitionEpoch++
 		if err := m.applyToggle(item, kind); err != nil {
 			m.err = err
 			return m, nil
 		}
 		m.classify(m.allItems())
+		m.moveCursor(1)
 		m.detailScroll = 0
 		return m, nil
 	}
 
 	m.transitionEpoch++
-	m.transition = &transition{
+	t := &transition{
 		key:     item.Key,
 		kind:    kind,
 		destTab: destTab,
 		phase:   phaseCursor,
 		epoch:   m.transitionEpoch,
 	}
-	return m, transitionTickCmd(m.transitionEpoch)
+	m.transitions = append(m.transitions, t)
+	// Advance to the next PR right away so tapping the key repeatedly stages a
+	// move per PR without waiting for the prior one to commit.
+	m.moveCursor(1)
+	m.detailScroll = 0
+	return m, transitionTickCmd(t.epoch)
 }
 
 // applyTransition commits a telegraphed toggle to the store and reclassifies
-// so the PR moves into its destination tab.
+// so the PR moves into its destination tab. Because several moves can be staged
+// at once, the committing PR often isn't the selected one — so the detail pane's
+// scroll is only reset when this commit actually changes what's under the cursor
+// (e.g. the selected PR was the one that just left).
 func (m *Model) applyTransition(t *transition) {
 	item, ok := m.itemByKey(t.key)
 	if !ok || m.store == nil {
 		return
+	}
+	prevSel := ""
+	if sel, ok := m.selectedItem(); ok {
+		prevSel = sel.Key
 	}
 	if err := m.applyToggle(item, t.kind); err != nil {
 		m.err = err
 		return
 	}
 	m.classify(m.allItems())
-	m.detailScroll = 0
+	if sel, ok := m.selectedItem(); !ok || sel.Key != prevSel {
+		m.detailScroll = 0
+	}
 }
 
 // copySelected copies the selected item's URL to the clipboard.

@@ -21,16 +21,18 @@ func testModel(t *testing.T, items []Item) Model {
 	return m
 }
 
-// advanceTransition drives the model's in-flight transition through its phase
-// ticks until it commits (or fails the test if it never does).
+// advanceTransition drives every in-flight transition through its phase ticks
+// until they all commit (or fails the test if they never do). Ticking the head
+// transition's epoch repeatedly advances then commits it (removing it), then
+// the next becomes the head.
 func advanceTransition(t *testing.T, m Model) Model {
 	t.Helper()
-	for i := 0; i < 10 && m.transition != nil; i++ {
-		tm, _ := m.Update(transitionTickMsg{epoch: m.transition.epoch})
+	for i := 0; i < 100 && len(m.transitions) > 0; i++ {
+		tm, _ := m.Update(transitionTickMsg{epoch: m.transitions[0].epoch})
 		m = tm.(Model)
 	}
-	if m.transition != nil {
-		t.Fatal("transition did not commit within 10 ticks")
+	if len(m.transitions) > 0 {
+		t.Fatal("transitions did not all commit within the tick budget")
 	}
 	return m
 }
@@ -83,17 +85,18 @@ func TestTransitionEnterMovesOutstandingToDone(t *testing.T) {
 	tm, cmd := m.startTransition(transitionDone)
 	m = tm.(Model)
 
-	if m.transition == nil {
+	tr := m.transitionByKey(item.Key)
+	if tr == nil {
 		t.Fatal("expected a telegraphed transition to be in flight")
 	}
 	if cmd == nil {
 		t.Fatal("expected a tick command to schedule the first phase")
 	}
-	if m.transition.destTab != tabDone {
-		t.Errorf("destTab = %d, want tabDone(%d)", m.transition.destTab, tabDone)
+	if tr.destTab != tabDone {
+		t.Errorf("destTab = %d, want tabDone(%d)", tr.destTab, tabDone)
 	}
-	if m.transition.phase != phaseCursor {
-		t.Errorf("phase = %d, want phaseCursor(%d)", m.transition.phase, phaseCursor)
+	if tr.phase != phaseCursor {
+		t.Errorf("phase = %d, want phaseCursor(%d)", tr.phase, phaseCursor)
 	}
 	// Not committed yet: the PR is still sitting in Outstanding.
 	if got := tabOf(m, item.Key); got != tabOutstanding {
@@ -115,11 +118,12 @@ func TestTransitionCancelWithSameKey(t *testing.T) {
 
 	tm, _ := m.startTransition(transitionDone)
 	m = tm.(Model)
-	// Same key again cancels the pending move.
+	// Same key again cancels the pending move. (Single item, so the cursor
+	// stayed put and is still on it.)
 	tm, _ = m.startTransition(transitionDone)
 	m = tm.(Model)
 
-	if m.transition != nil {
+	if len(m.transitions) != 0 {
 		t.Fatal("expected the pending transition to be cancelled")
 	}
 	if got := tabOf(m, item.Key); got != tabOutstanding {
@@ -140,14 +144,15 @@ func TestTransitionRedirectWithOtherKey(t *testing.T) {
 	tm, _ = m.startTransition(transitionIgnore)
 	m = tm.(Model)
 
-	if m.transition == nil {
+	tr := m.transitionByKey(item.Key)
+	if tr == nil {
 		t.Fatal("expected the redirected transition to still be in flight")
 	}
-	if m.transition.kind != transitionIgnore || m.transition.destTab != tabIgnored {
-		t.Fatalf("expected redirect toward Ignored, got kind=%d destTab=%d", m.transition.kind, m.transition.destTab)
+	if tr.kind != transitionIgnore || tr.destTab != tabIgnored {
+		t.Fatalf("expected redirect toward Ignored, got kind=%d destTab=%d", tr.kind, tr.destTab)
 	}
-	if m.transition.phase != phaseCursor {
-		t.Errorf("redirect should restart from phaseCursor, got phase %d", m.transition.phase)
+	if tr.phase != phaseCursor {
+		t.Errorf("redirect should restart from phaseCursor, got phase %d", tr.phase)
 	}
 
 	m = advanceTransition(t, m)
@@ -174,11 +179,12 @@ func TestTransitionReverseOutOfDone(t *testing.T) {
 	// Enter from within Done telegraphs the PR back out to Outstanding.
 	tm, cmd := m.startTransition(transitionDone)
 	m = tm.(Model)
-	if m.transition == nil || cmd == nil {
+	tr := m.transitionByKey(item.Key)
+	if tr == nil || cmd == nil {
 		t.Fatal("expected a telegraphed reverse transition")
 	}
-	if m.transition.destTab != tabOutstanding {
-		t.Errorf("reverse destTab = %d, want tabOutstanding(%d)", m.transition.destTab, tabOutstanding)
+	if tr.destTab != tabOutstanding {
+		t.Errorf("reverse destTab = %d, want tabOutstanding(%d)", tr.destTab, tabOutstanding)
 	}
 
 	m = advanceTransition(t, m)
@@ -205,8 +211,8 @@ func TestTransitionIgnoredToDoneClearsIgnored(t *testing.T) {
 	// Enter on an ignored PR moves it to Done and clears the ignored flag.
 	tm, _ := m.startTransition(transitionDone)
 	m = tm.(Model)
-	if m.transition == nil || m.transition.destTab != tabDone {
-		t.Fatalf("expected a transition toward Done, got %+v", m.transition)
+	if tr := m.transitionByKey(item.Key); tr == nil || tr.destTab != tabDone {
+		t.Fatalf("expected a transition toward Done, got %+v", tr)
 	}
 
 	m = advanceTransition(t, m)
@@ -221,83 +227,134 @@ func TestTransitionIgnoredToDoneClearsIgnored(t *testing.T) {
 	}
 }
 
-// TestCursorFollowsElementWhenMovedDuringTransition covers the case the cursor
-// is moved to another PR while an Enter/i toggle is telegraphing: once the
-// toggled PR leaves the tab, the cursor should stay on the PR it was moved to,
-// not on whatever index that PR used to sit at.
-func TestCursorFollowsElementWhenMovedDuringTransition(t *testing.T) {
+// TestToggleAdvancesCursorToNext: acting on a PR stages its move and advances
+// the cursor to the next PR right away; once the staged PR commits and leaves,
+// the cursor stays locked on the PR it advanced to.
+func TestToggleAdvancesCursorToNext(t *testing.T) {
 	a := outstandingItem("owner/repo#1")
 	b := outstandingItem("owner/repo#2")
 	c := outstandingItem("owner/repo#3")
 	m := testModel(t, []Item{a, b, c})
 	m.activeTab = tabOutstanding
+	m.cursors[tabOutstanding] = 0 // on A
 
-	// Enter on A (index 0) starts a telegraphed move to Done; A stays in place.
-	m.cursors[tabOutstanding] = 0
 	tm, _ := m.startTransition(transitionDone)
 	m = tm.(Model)
-
-	// During the delay the user moves the cursor down to B (index 1).
-	m.moveCursor(1)
+	if m.transitionByKey(a.Key) == nil {
+		t.Fatal("expected A to be staged")
+	}
 	if sel, _ := m.selectedItem(); sel.Key != b.Key {
-		t.Fatalf("setup: expected cursor on B before commit, got %q", sel.Key)
+		t.Fatalf("cursor should have advanced to B, got %q", sel.Key)
+	}
+	if got := tabOf(m, a.Key); got != tabOutstanding {
+		t.Fatalf("A should still be in Outstanding mid-telegraph, found tab %d", got)
 	}
 
-	// A commits and leaves the tab; B shifts up from index 1 to index 0. The
-	// cursor should follow B rather than stay at index 1 (which is now C).
 	m = advanceTransition(t, m)
 	if got := tabOf(m, a.Key); got != tabDone {
-		t.Fatalf("expected A in Done after commit, found in tab %d", got)
+		t.Fatalf("A should be in Done after commit, found tab %d", got)
 	}
 	if sel, ok := m.selectedItem(); !ok || sel.Key != b.Key {
-		t.Fatalf("cursor should stay on B after A leaves, got %q (ok=%v)", sel.Key, ok)
+		t.Fatalf("cursor should stay locked on B, got %q (ok=%v)", sel.Key, ok)
 	}
 }
 
-// TestCursorHoldsIndexWhenItsElementLeaves covers the plain case: the cursor is
-// on the PR being toggled and isn't moved during the telegraph. When that PR
-// leaves, the cursor keeps its position so the next PR slides in under it.
-func TestCursorHoldsIndexWhenItsElementLeaves(t *testing.T) {
+// TestToggleLastItemMovesCursorToPrevious: with no next PR to advance to, the
+// cursor stays on the acted-on PR while it telegraphs, then falls back to the
+// previous PR once it leaves.
+func TestToggleLastItemMovesCursorToPrevious(t *testing.T) {
 	a := outstandingItem("owner/repo#1")
 	b := outstandingItem("owner/repo#2")
 	m := testModel(t, []Item{a, b})
 	m.activeTab = tabOutstanding
+	m.cursors[tabOutstanding] = 1 // on B, the last item
 
-	m.cursors[tabOutstanding] = 0 // on A
 	tm, _ := m.startTransition(transitionDone)
 	m = tm.(Model)
+	if sel, _ := m.selectedItem(); sel.Key != b.Key {
+		t.Fatalf("with no next item the cursor should stay on B, got %q", sel.Key)
+	}
 
 	m = advanceTransition(t, m)
-	if sel, ok := m.selectedItem(); !ok || sel.Key != b.Key {
-		t.Fatalf("expected the next PR (B) to slide under the cursor, got %q (ok=%v)", sel.Key, ok)
+	if sel, ok := m.selectedItem(); !ok || sel.Key != a.Key {
+		t.Fatalf("cursor should fall back to A after B leaves, got %q (ok=%v)", sel.Key, ok)
 	}
 }
 
-func TestTransitionOnDifferentPRCommitsPrior(t *testing.T) {
+func TestStackedTransitionsCoexistAndCommit(t *testing.T) {
 	a := outstandingItem("owner/repo#1")
 	b := outstandingItem("owner/repo#2")
-	m := testModel(t, []Item{a, b})
+	c := outstandingItem("owner/repo#3")
+	m := testModel(t, []Item{a, b, c})
 	m.activeTab = tabOutstanding
-
-	// Start a transition on A, then act on B before A finishes.
 	m.cursors[tabOutstanding] = 0
-	tm, _ := m.startTransition(transitionDone)
-	m = tm.(Model)
 
-	m.cursors[tabOutstanding] = 1 // move to B
-	tm, _ = m.startTransition(transitionDone)
-	m = tm.(Model)
-
-	// A's pending move should have been committed immediately.
-	if !m.store.IsDone(a) {
-		t.Error("starting a new transition should have committed the prior PR's move")
+	// Tap i three times: each stages the PR under the cursor toward Ignored and
+	// advances, so all three end up staged at once with none committing early.
+	for i := 0; i < 3; i++ {
+		tm, _ := m.startTransition(transitionIgnore)
+		m = tm.(Model)
 	}
-	if m.transition == nil || m.transition.key != b.Key {
-		t.Fatalf("expected a live transition on B, got %+v", m.transition)
+	if len(m.transitions) != 3 {
+		t.Fatalf("expected 3 stacked transitions, got %d", len(m.transitions))
+	}
+	for _, it := range []Item{a, b, c} {
+		if m.store.IsIgnored(it) {
+			t.Fatalf("no PR should be committed yet, but %s is ignored", it.Key)
+		}
+	}
+
+	// They then all commit, one per delay, landing every PR in Ignored.
+	m = advanceTransition(t, m)
+	for _, it := range []Item{a, b, c} {
+		if got := tabOf(m, it.Key); got != tabIgnored {
+			t.Fatalf("%s should be in Ignored after commit, found tab %d", it.Key, got)
+		}
+		if !m.store.IsIgnored(it) {
+			t.Errorf("%s should be marked ignored", it.Key)
+		}
+	}
+}
+
+// TestCancelOneOfSeveralStagedMoves: with several moves stacked, navigating back
+// to one and pressing its key again cancels just that PR's move; the rest still
+// commit.
+func TestCancelOneOfSeveralStagedMoves(t *testing.T) {
+	a := outstandingItem("owner/repo#1")
+	b := outstandingItem("owner/repo#2")
+	c := outstandingItem("owner/repo#3")
+	m := testModel(t, []Item{a, b, c})
+	m.activeTab = tabOutstanding
+	m.cursors[tabOutstanding] = 0
+
+	for i := 0; i < 3; i++ {
+		tm, _ := m.startTransition(transitionIgnore)
+		m = tm.(Model)
+	}
+
+	// Nothing has committed, so Outstanding still holds [A, B, C]; go back to B.
+	m.cursors[tabOutstanding] = 1
+	if sel, _ := m.selectedItem(); sel.Key != b.Key {
+		t.Fatalf("setup: expected cursor on B, got %q", sel.Key)
+	}
+	tm, _ := m.startTransition(transitionIgnore) // same key ⇒ cancel B's move
+	m = tm.(Model)
+
+	if m.transitionByKey(b.Key) != nil {
+		t.Fatal("B's staged move should have been cancelled")
+	}
+	if len(m.transitions) != 2 {
+		t.Fatalf("expected 2 remaining staged moves, got %d", len(m.transitions))
 	}
 
 	m = advanceTransition(t, m)
-	if !m.store.IsDone(b) {
-		t.Error("expected B to be done after its transition commits")
+	if !m.store.IsIgnored(a) || !m.store.IsIgnored(c) {
+		t.Error("A and C should be ignored after the rest commit")
+	}
+	if m.store.IsIgnored(b) {
+		t.Error("B's move was cancelled, so it should not be ignored")
+	}
+	if got := tabOf(m, b.Key); got != tabOutstanding {
+		t.Fatalf("B should remain in Outstanding, found tab %d", got)
 	}
 }

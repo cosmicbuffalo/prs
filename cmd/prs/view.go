@@ -159,16 +159,17 @@ func (m Model) tabDefs() []tabDef {
 		len(m.items[tabIgnored]),
 	}
 
-	// During a telegraphed toggle, flash the destination tab's label (from
-	// phaseTab on) and show its count already incremented (from phaseCount
-	// on) — before the PR has actually moved there.
-	destTab := -1
-	var destColor lipgloss.Color
-	if m.transition != nil {
-		destTab = m.transition.destTab
-		destColor = bucketColor(destTab)
-		if m.transition.phase >= phaseCount {
-			counts[destTab]++
+	// During telegraphed toggles, flash each destination tab's label (from
+	// phaseTab on) and show its count already incremented (from phaseCount on) —
+	// before the PRs have actually moved there. Several PRs can be staged toward
+	// the same tab at once, so counts accumulate one per transition.
+	highlightTab := [4]bool{}
+	for _, t := range m.transitions {
+		if t.phase >= phaseCount {
+			counts[t.destTab]++
+		}
+		if t.phase >= phaseTab {
+			highlightTab[t.destTab] = true
 		}
 	}
 
@@ -183,8 +184,8 @@ func (m Model) tabDefs() []tabDef {
 	defs := make([]tabDef, 4)
 	for i := 0; i < 4; i++ {
 		d := tabDef{label: labels[i], idx: idxs[i]}
-		if idxs[i] == destTab && m.transition != nil && m.transition.phase >= phaseTab {
-			c := destColor
+		if highlightTab[idxs[i]] {
+			c := bucketColor(idxs[i])
 			d.highlight = &c
 		}
 		defs[i] = d
@@ -713,10 +714,10 @@ func (m Model) renderListEntry(item Item, selected bool, width int) []string {
 	// red in Ignored, orange in Outstanding, white in New).
 	bar := highlightBar(selected, bucketColor(m.activeTab))
 	// A PR mid-telegraphed-toggle shows its cursor bar recolored to its
-	// destination bucket regardless of where the cursor actually is, so the
-	// in-flight move is visible on its own row.
-	if m.transition != nil && m.transition.key == item.Key {
-		bar = transitionBar(m.transition.destTab)
+	// destination bucket regardless of where the cursor actually is, so each
+	// staged move is visible on its own row (several can be in flight at once).
+	if t := m.transitionByKey(item.Key); t != nil {
+		bar = transitionBar(t.destTab)
 	}
 	// Hard-cap each line to the column's display width so a line with
 	// wide runes (emoji/CJK) that rune-count truncation under-cuts can't
