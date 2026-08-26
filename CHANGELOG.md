@@ -8,6 +8,19 @@ the published release notes.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.5] - 2026-08-26
+
+### Added
+- **Self-update**: a `prs update` subcommand that downloads the latest release
+  for your platform, verifies its checksum, and atomically swaps the binary in
+  place (following the installed symlink to its target). Supports
+  `prs update --check` (report only), `--force` (reinstall/repair), an explicit
+  `prs update <version>` (pin or downgrade), and `$PRS_VERSION` — mirroring the
+  installer's knobs.
+- A cached (once-a-day), non-blocking startup check that shows a subtle
+  `⬆ vX.Y.Z available · prs update` note in the footer when a newer release is
+  out. On by default; disable it with `updates.check: false` in `config.json`.
+
 ## [0.1.4] - 2026-08-26
 
 ### Added

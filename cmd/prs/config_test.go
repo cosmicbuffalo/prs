@@ -89,6 +89,51 @@ func TestLoadConfigMalformedErrors(t *testing.T) {
 	}
 }
 
+// TestConfigUpdatesCheckToggle verifies the updates.check field parses and that
+// apply() toggles the updateCheckEnabled global only when the field is set.
+func TestConfigUpdatesCheckToggle(t *testing.T) {
+	saved := updateCheckEnabled
+	t.Cleanup(func() { updateCheckEnabled = saved })
+
+	// Explicit false turns it off.
+	updateCheckEnabled = true
+	Config{Updates: UpdatesConfig{Check: boolPtr(false)}}.apply()
+	if updateCheckEnabled {
+		t.Error("updates.check=false should disable the update check")
+	}
+
+	// Explicit true turns it on.
+	updateCheckEnabled = false
+	Config{Updates: UpdatesConfig{Check: boolPtr(true)}}.apply()
+	if !updateCheckEnabled {
+		t.Error("updates.check=true should enable the update check")
+	}
+
+	// Omitted (nil) leaves the current value untouched.
+	updateCheckEnabled = true
+	Config{}.apply()
+	if !updateCheckEnabled {
+		t.Error("omitting updates.check should leave the default (on) unchanged")
+	}
+}
+
+func TestLoadConfigParsesUpdatesCheck(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PRS_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"updates":{"check":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Updates.Check == nil || *cfg.Updates.Check != false {
+		t.Errorf("updates.check = %v, want a pointer to false", cfg.Updates.Check)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
 // TestReviewMark verifies the glyph/color selection precedence: a change request
 // always wins over IsCodeowner; a trusted approval gets the trusted mark; any
 // other approval gets the regular mark.

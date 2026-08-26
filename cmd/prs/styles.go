@@ -49,6 +49,11 @@ var (
 	spinnerStyle = lipgloss.NewStyle().Foreground(chipFg)
 	statusStyle  = lipgloss.NewStyle().Foreground(chipFg)
 	errorStyle   = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+
+	// styleUpdateHint styles the footer's "update available" nudge — the accent
+	// color (not faint like the other footer hints) so it stands out, without
+	// the alarm of an error.
+	styleUpdateHint = lipgloss.NewStyle().Foreground(chipFg)
 )
 
 // bucketColors is the accent color for each tab/bucket, indexed by tab

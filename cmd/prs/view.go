@@ -1766,6 +1766,12 @@ func (m Model) renderFooter() string {
 
 	left := leftMarginStr() + lead + live
 
+	// A newer release is available: append a subtle accent-colored nudge to the
+	// left slot (kept in `left` so the narrow-terminal fallback preserves it).
+	if m.updateAvailable != "" {
+		left += styleUpdateHint.Render("  ⬆ " + m.updateAvailable + " available · prs update")
+	}
+
 	// Right: the essential hints.
 	hints := []struct{ label, key string }{
 		{"Toggle Done", "Enter"},

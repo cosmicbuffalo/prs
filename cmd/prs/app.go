@@ -136,6 +136,11 @@ type Model struct {
 	// success.
 	lastFetch time.Time
 
+	// updateAvailable holds a newer release's tag (e.g. "v0.1.5") once the
+	// background startup check finds one, else "". When set, the footer shows an
+	// "update available" hint pointing at `prs update` (see checkUpdateCmd).
+	updateAvailable string
+
 	// hasData is true once the list/detail panels have ever shown real
 	// content — either a cached result loaded instantly on startup, or a
 	// completed fresh fetch. Once true, it stays true: a later "r" refresh
@@ -238,6 +243,12 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.liveRefresh {
 		cmds = append(cmds, liveRefreshTickCmd(m.liveRefreshEpoch))
+	}
+	// Background, non-blocking check for a newer release (cached; see
+	// checkUpdateCmd). Skipped for dev builds (no meaningful version to compare)
+	// and when disabled via config.
+	if updateCheckEnabled && version != "dev" {
+		cmds = append(cmds, checkUpdateCmd())
 	}
 	return tea.Batch(cmds...)
 }
