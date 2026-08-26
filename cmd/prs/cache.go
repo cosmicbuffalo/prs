@@ -37,28 +37,28 @@ func cachePath() (string, error) {
 	return filepath.Join(dir, "cache.json"), nil
 }
 
-// LoadCache returns the last cached fetch result for repo/user, and whether
-// one was found. A missing, corrupt, or repo/user-mismatched cache file is
-// treated as "no cache" (ok=false) rather than an error — a cache miss
-// should never block the TUI from opening, it just means falling back to
+// LoadCache returns the last cached fetch result for repo/user, when it was
+// saved, and whether one was found. A missing, corrupt, or repo/user-mismatched
+// cache file is treated as "no cache" (ok=false) rather than an error — a cache
+// miss should never block the TUI from opening, it just means falling back to
 // the normal loading spinner.
-func LoadCache(repo, user string) (items []Item, ok bool) {
+func LoadCache(repo, user string) (items []Item, savedAt time.Time, ok bool) {
 	path, err := cachePath()
 	if err != nil {
-		return nil, false
+		return nil, time.Time{}, false
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false
+		return nil, time.Time{}, false
 	}
 	var cf cacheFile
 	if err := json.Unmarshal(data, &cf); err != nil {
-		return nil, false
+		return nil, time.Time{}, false
 	}
 	if cf.Repo != repo || cf.User != user {
-		return nil, false
+		return nil, time.Time{}, false
 	}
-	return cf.Items, true
+	return cf.Items, cf.SavedAt, true
 }
 
 // SaveCache atomically writes items as the new cache for repo/user (temp

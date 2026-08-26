@@ -81,7 +81,9 @@ Your Done and Ignored states are saved to disk (`~/.local/state/prs/state.json`)
 
 Selecting a PR shows its details alongside the list: the URL and title, a summary (who opened it, diff size, commit/comment counts, participant list), the review status, and the recent comment/commit thread.
 
-The **Review Status** section is always shown, with a grayed-out "No reviews yet" when a PR has none. For **New** PRs the full comment/review/commit data is fetched lazily the first time you select the PR (you'll briefly see "Loading…", and its counts show `…` until it lands), so the initial load and refreshes stay fast.
+The **Review Status** section is always shown, with a grayed-out "No reviews yet" when a PR has none. Each review is drawn with a small mark and the reviewer's name: a **trusted** (codeowner) approval shows an amber star (`⭑`) with the reviewer's name in *italics*, a **regular** (valid but non-codeowner) approval shows a green check (`✓`), and a **change request** shows a red `✗`. Superseded reviews are grayed out. The same marks appear as a compact icon sequence next to each PR in the list. (All three colors and glyphs are [configurable](#configuration).)
+
+For **New** PRs the full comment/review/commit data is fetched lazily the first time you select the PR (you'll briefly see "Loading…", and its counts show `…` until it lands), so the initial load and refreshes stay fast.
 
 ## Keybindings
 
@@ -95,12 +97,19 @@ The **Review Status** section is always shown, with a grayed-out "No reviews yet
 | `Ctrl+D` / `Ctrl+U` | Scroll the detail panel down / up |
 | `v` | Toggle between horizontal and vertical layout |
 | `r` | Re-fetch everything from scratch |
+| `R` | Toggle **live refresh** (auto re-fetch every 5 min; on by default) |
 | `?` | Show/hide the keybindings help overlay |
 | `q` / `Ctrl+C` | Quit |
 
 Only `Enter`, `i`, `?`, and `q` are shown in the footer; press `?` for the full list above in a floating overlay.
 
+The footer's left side is a status slot: while a fetch is running it shows a spinner and `Refreshing…`, and otherwise the freshness note `As of X ago` (the time since the last successful fetch, ticking up live). A `(LIVE ON/OFF)` indicator is appended to whichever is showing — always visible — green when live refresh is on, red when off.
+
 The mouse works too: click a tab or a PR to select it, and scroll the wheel over the list or the detail panel to scroll that side.
+
+### Live refresh
+
+Live refresh is **on by default** and re-fetches everything every 5 minutes in the background, so the list stays current without any input. Toggle it with `R`; a manual `r` refresh (or an automatic one) resets the countdown, so the next automatic refresh is always a full interval after the most recent one.
 
 ### Layout
 
@@ -108,6 +117,29 @@ The mouse works too: click a tab or a PR to select it, and scroll the wheel over
 
 - **Horizontal** (default) — PR list on the left, detail panel on the right. The detail panel's header (URL, title, PR details, review status) stays pinned while the comment/commit thread below it scrolls.
 - **Vertical** — PR list across the full width on top, detail panel across the full width on the bottom. The whole detail panel scrolls as one.
+
+## Configuration
+
+`prs` reads an optional `config.json` on startup from `$PRS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/prs`, else `~/.config/prs`. It's entirely optional — with no file, the built-in defaults are used. A missing file is fine; a malformed one prints a warning and falls back to defaults.
+
+Currently it customizes the review marks (colors and glyphs). Colors are any [lipgloss](https://github.com/charmbracelet/lipgloss) color string — an ANSI 256 index (`"2"`, `"15"`) or a hex value (`"#5fafff"`); glyphs are any string (usually a single glyph). Any field you omit keeps its default.
+
+```json
+{
+  "review": {
+    "trusted_color": "214",
+    "regular_color": "2",
+    "changes_color": "1",
+    "trusted_glyph": "⭑",
+    "regular_glyph": "✓",
+    "changes_glyph": "✗"
+  }
+}
+```
+
+- `trusted_*` — a codeowner / trusted-reviewer-satisfying approval (default: amber `⭑`)
+- `regular_*` — a valid approval that isn't from the trusted-reviewer team (default: green `✓`)
+- `changes_*` — a change request (default: red `✗`)
 
 ## Requirements
 

@@ -16,11 +16,11 @@ var (
 	colorMagenta = lipgloss.Color("5")
 	colorOrange  = lipgloss.Color("208")
 	colorYellow  = lipgloss.Color("3")
+	colorAmber   = lipgloss.Color("214")
 	colorWhite   = lipgloss.Color("15")
 	colorBlue    = lipgloss.Color("12")
 
 	styleApproved         = lipgloss.NewStyle().Foreground(colorGreen)
-	styleWeakApproved     = lipgloss.NewStyle().Foreground(colorYellow) // an approval that's valid but not from the trusted-reviewer team — yellow so it's clearly distinct from both a full (green) approval and a superseded (gray) one
 	styleChangesRequested = lipgloss.NewStyle().Foreground(colorRed)
 	styleCommented        = lipgloss.NewStyle().Foreground(colorCyan)
 	styleNotReviewed      = lipgloss.NewStyle().Foreground(colorGray)
@@ -71,3 +71,19 @@ func bucketColor(tab int) lipgloss.Color {
 	}
 	return bucketColors[tab]
 }
+
+// Review styling — the colors and glyphs used to render review states in the
+// detail pane's Review Status section and the compact per-PR review-icon
+// sequence in the list. These are the built-in defaults; each can be overridden
+// from the config file (see config.go / Config.apply). They're read at render
+// time (not baked into prebuilt lipgloss styles), so applying config once
+// before the program starts is enough for the overrides to take effect.
+var (
+	reviewTrustedColor = colorAmber // codeowner / trusted-reviewer approval
+	reviewRegularColor = colorGreen // a valid approval, but not from the trusted-reviewer team
+	reviewChangesColor = colorRed   // changes requested
+
+	reviewTrustedGlyph = "⭑" // U+2B51 Black Small Star
+	reviewRegularGlyph = "✓" // U+2713 Check Mark
+	reviewChangesGlyph = "✗" // U+2717 Ballot X
+)

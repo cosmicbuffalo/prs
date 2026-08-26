@@ -8,6 +8,28 @@ the published release notes.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.4] - 2026-08-26
+
+### Added
+- **Live refresh**: the list now auto re-fetches every 5 minutes in the
+  background, on by default. Toggle it with `R` (capital). A manual `r` refresh
+  (or an automatic one) resets the countdown, so the next automatic refresh is
+  always a full interval after the most recent one.
+- A footer status slot on the left: it shows a spinner and `Refreshing…` while a
+  fetch is in flight, otherwise `As of X ago` (time since the last successful
+  fetch, ticking up live). A `(LIVE ON/OFF)` indicator is always appended —
+  green when live refresh is on, red when off.
+- **Configurable review styling** via an optional `config.json`
+  (`$PRS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/prs`, else `~/.config/prs`). The
+  colors and glyphs for trusted/regular/changes-requested reviews can each be
+  overridden; see the README's Configuration section.
+
+### Changed
+- Review marks are clearer: a trusted (codeowner) approval now shows an amber
+  star (`⭑`) with the reviewer's name in italics; a regular (valid but
+  non-codeowner) approval shows a green check (`✓`). The star makes trusted
+  approvals stand out at a glance. Change requests stay red (`✗`).
+
 ## [0.1.3] - 2026-08-20
 
 ### Changed

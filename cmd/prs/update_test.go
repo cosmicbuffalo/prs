@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // testModel builds a Model backed by a scratch store, classifies the given
@@ -356,5 +358,157 @@ func TestCancelOneOfSeveralStagedMoves(t *testing.T) {
 	}
 	if got := tabOf(m, b.Key); got != tabOutstanding {
 		t.Fatalf("B should remain in Outstanding, found tab %d", got)
+	}
+}
+
+// keyR is a capital-R key press (the live-refresh toggle).
+var keyR = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}}
+
+// TestLiveRefreshToggle: R flips the flag, invalidates any pending tick by
+// bumping the epoch, and shows a status message; toggling back on returns a
+// (re-armed) tick command.
+func TestLiveRefreshToggle(t *testing.T) {
+	m := testModel(t, []Item{outstandingItem("owner/repo#1")})
+	m.liveRefresh = true
+	m.hasData = true
+
+	// Off.
+	tm, _ := m.handleKey(keyR)
+	m = tm.(Model)
+	if m.liveRefresh {
+		t.Fatal("R should have turned live refresh off")
+	}
+	if m.statusMsg != "Live refresh off" {
+		t.Errorf("status = %q, want %q", m.statusMsg, "Live refresh off")
+	}
+	offEpoch := m.liveRefreshEpoch
+
+	// A tick scheduled before the toggle-off is now stale and must be ignored.
+	tm, cmd := m.Update(liveRefreshTickMsg{epoch: offEpoch})
+	m = tm.(Model)
+	if m.loading {
+		t.Error("a live-refresh tick should not start a fetch while live refresh is off")
+	}
+	if cmd != nil {
+		t.Error("a stale/off live-refresh tick should not reschedule")
+	}
+
+	// Back on: re-arms (bumps epoch, returns a tick command).
+	tm, cmd = m.handleKey(keyR)
+	m = tm.(Model)
+	if !m.liveRefresh {
+		t.Fatal("R should have turned live refresh back on")
+	}
+	if m.liveRefreshEpoch == offEpoch {
+		t.Error("turning live refresh on should have re-armed with a fresh epoch")
+	}
+	if cmd == nil {
+		t.Error("turning live refresh on should return a re-arm command batch")
+	}
+	if m.statusMsg != "Live refresh on" {
+		t.Errorf("status = %q, want %q", m.statusMsg, "Live refresh on")
+	}
+}
+
+// TestLiveRefreshTickTriggersRefresh: a current-epoch tick with live refresh on
+// (and no fetch in flight) starts a refresh.
+func TestLiveRefreshTickTriggersRefresh(t *testing.T) {
+	m := testModel(t, []Item{outstandingItem("owner/repo#1")})
+	m.liveRefresh = true
+	m.hasData = true
+
+	tm, cmd := m.Update(liveRefreshTickMsg{epoch: m.liveRefreshEpoch})
+	m = tm.(Model)
+	if !m.loading {
+		t.Error("a current-epoch live-refresh tick should have started a fetch")
+	}
+	if cmd == nil {
+		t.Error("beginRefresh should return a command batch")
+	}
+}
+
+// TestLiveRefreshStaleTickIgnored: a tick whose epoch no longer matches (e.g.
+// the countdown was re-armed since) is a no-op even with live refresh on.
+func TestLiveRefreshStaleTickIgnored(t *testing.T) {
+	m := testModel(t, []Item{outstandingItem("owner/repo#1")})
+	m.liveRefresh = true
+	m.hasData = true
+
+	tm, cmd := m.Update(liveRefreshTickMsg{epoch: m.liveRefreshEpoch - 1})
+	m = tm.(Model)
+	if m.loading {
+		t.Error("a stale-epoch tick should not start a fetch")
+	}
+	if cmd != nil {
+		t.Error("a stale-epoch tick should not reschedule")
+	}
+}
+
+// TestLiveRefreshTickWhileLoadingReArmsOnly: if a fetch is already running when
+// a tick fires, it re-arms the countdown without stacking a second fetch.
+func TestLiveRefreshTickWhileLoadingReArmsOnly(t *testing.T) {
+	m := testModel(t, []Item{outstandingItem("owner/repo#1")})
+	m.liveRefresh = true
+	m.hasData = true
+	m.loading = true
+	prevEpoch := m.liveRefreshEpoch
+
+	tm, cmd := m.Update(liveRefreshTickMsg{epoch: m.liveRefreshEpoch})
+	m = tm.(Model)
+	if m.liveRefreshEpoch == prevEpoch {
+		t.Error("a tick during a fetch should still re-arm the countdown")
+	}
+	if cmd == nil {
+		t.Error("a tick during a fetch should reschedule the next tick")
+	}
+}
+
+// TestManualRefreshResetsLiveCountdown: beginRefresh (the "r" key path) re-arms
+// the live-refresh countdown, so a manual refresh restarts the 5-minute timer.
+func TestManualRefreshResetsLiveCountdown(t *testing.T) {
+	m := testModel(t, []Item{outstandingItem("owner/repo#1")})
+	m.liveRefresh = true
+	m.hasData = true
+	prevEpoch := m.liveRefreshEpoch
+
+	tm, _ := m.beginRefresh()
+	m = tm.(Model)
+	if !m.loading {
+		t.Error("beginRefresh should set loading")
+	}
+	if m.liveRefreshEpoch == prevEpoch {
+		t.Error("a manual refresh should re-arm (bump the epoch of) the live countdown")
+	}
+
+	// With live refresh off, beginRefresh must not arm anything.
+	m2 := testModel(t, []Item{outstandingItem("owner/repo#2")})
+	m2.liveRefresh = false
+	before := m2.liveRefreshEpoch
+	tm2, _ := m2.beginRefresh()
+	m2 = tm2.(Model)
+	if m2.liveRefreshEpoch != before {
+		t.Error("with live refresh off, beginRefresh should not touch the epoch")
+	}
+}
+
+func TestFooterAge(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		t    time.Time
+		want string
+	}{
+		{"zero", time.Time{}, "never"},
+		{"seconds", now.Add(-5 * time.Second), "5 seconds ago"},
+		{"one second", now.Add(-1 * time.Second), "1 second ago"},
+		{"minutes", now.Add(-3 * time.Minute), "3 minutes ago"},
+		{"hours", now.Add(-2 * time.Hour), "2 hours ago"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := footerAge(c.t); got != c.want {
+				t.Errorf("footerAge = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
