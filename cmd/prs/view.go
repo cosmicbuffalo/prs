@@ -85,7 +85,7 @@ func (m Model) View() string {
 	header := m.renderHeader()
 	tabBar := m.renderTabBar()
 	status := m.renderStatus()
-	footer := renderFooter(m.width)
+	footer := m.renderFooter()
 	bodyHeight := m.bodyHeight()
 
 	var body string
@@ -275,15 +275,16 @@ func renderTab(label string, active bool, activeColor lipgloss.Color, highlight 
 	return
 }
 
+// renderStatus renders the transient status line above the footer: a copy/
+// toggle confirmation or a fetch error. The "Refreshing…" indicator lives in
+// the footer now (see renderFooter), sharing its left slot with the "As of…"
+// note, so it isn't handled here.
 func (m Model) renderStatus() string {
-	if m.loading && m.hasData {
-		return leftMarginStr() + fmt.Sprintf("%s Refreshing...", m.spinner.View())
-	}
 	if m.statusMsg != "" {
-		return statusStyle.Render(m.statusMsg)
+		return leftMarginStr() + statusStyle.Render(m.statusMsg)
 	}
 	if m.err != nil {
-		return errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+		return leftMarginStr() + errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 	return ""
 }
@@ -302,6 +303,7 @@ func helpBox() string {
 		{"v", "toggle layout"},
 		{"^d / ^u", "scroll detail"},
 		{"r", "refresh"},
+		{"R", "toggle live refresh"},
 		{"?", "toggle help"},
 		{"q", "quit"},
 	}
@@ -503,7 +505,7 @@ func (m Model) bodyHeight() int {
 	header := m.renderHeader()
 	tabBar := m.renderTabBar()
 	status := m.renderStatus()
-	footer := renderFooter(m.width)
+	footer := m.renderFooter()
 
 	fixed := 1 + lipgloss.Height(header) + lipgloss.Height(tabBar) + 1 +
 		lipgloss.Height(status) + lipgloss.Height(footer)
@@ -824,28 +826,38 @@ func renderEntrySummaryLine(item Item, width int) string {
 	return styleDim.Render(entryBulletPrefix + truncateRunes(item.LatestSummary, budget))
 }
 
+// reviewMark returns the configured glyph and color for a current review event:
+// the changes-requested mark for a change request, the trusted mark for a
+// codeowner/trusted-reviewer approval, or the regular mark for any other
+// (valid but non-trusted) approval. The change-request case is checked first,
+// so a change request always shows the ✗ mark regardless of IsCodeowner.
+// Superseded entries reuse the glyph but are rendered gray by the caller.
+func reviewMark(ev ReviewEvent) (glyph string, color lipgloss.Color) {
+	switch {
+	case ev.State == ReviewChangesRequested:
+		return reviewChangesGlyph, reviewChangesColor
+	case ev.IsCodeowner:
+		return reviewTrustedGlyph, reviewTrustedColor
+	default:
+		return reviewRegularGlyph, reviewRegularColor
+	}
+}
+
 // renderReviewIconSequence renders a compact, space-separated sequence of
 // review icons — one per reviewer, showing only their latest valid (i.e.
-// current/non-Superseded) state, in arrival order. Coloring matches the
-// detail panel's Review Status section exactly: red ✗ for a current change
-// request, green ✓ for a current trusted-reviewer-satisfying approval,
-// yellow ✓ for a current approval that isn't from the required
-// trusted-reviewer team — yellow rather than gray so it's not confusable
-// with a superseded/invalidated entry.
+// current/non-Superseded) state, in arrival order. Each icon's glyph and color
+// come from reviewMark, so the compact list icons always match the detail
+// pane's Review Status section: the trusted mark for a trusted-reviewer-
+// satisfying approval, the regular mark for a valid-but-non-trusted approval,
+// and the changes-requested mark for a current change request.
 func renderReviewIconSequence(events []ReviewEvent) string {
 	var parts []string
 	for _, ev := range events {
 		if ev.Superseded {
 			continue
 		}
-		switch {
-		case ev.State == ReviewChangesRequested:
-			parts = append(parts, styleChangesRequested.Render("✗"))
-		case ev.IsCodeowner:
-			parts = append(parts, styleApproved.Render("✓"))
-		default:
-			parts = append(parts, styleWeakApproved.Render("✓"))
-		}
+		glyph, color := reviewMark(ev)
+		parts = append(parts, lipgloss.NewStyle().Foreground(color).Render(glyph))
 	}
 	return strings.Join(parts, " ")
 }
@@ -1361,46 +1373,33 @@ func wrapWithHangingIndent(prefix, content string, width int) []string {
 }
 
 // renderReviewStatusLine renders one formal review event, in the PR's full
-// timeline (nothing is hidden — see reviewEvents): a checkmark/✗, the
+// timeline (nothing is hidden — see reviewEvents): a review mark (glyph), the
 // reviewer's username tag, and a relative timestamp right-aligned in a
 // fixed-width column at the row's right edge (so every row's timestamp
 // lines up in one column, regardless of username length).
 //
-// Coloring:
+// Glyph and color come from reviewMark (config-overridable — see styles.go):
 //   - Superseded (not this reviewer's current/last formal review — whether
 //     because a later review changed their stance, or just re-affirmed it)
-//     is grayed out entirely: gray symbol AND gray username tag.
-//   - A current ChangesRequested is red, with a colored username tag.
-//   - A current Approved is green (IsCodeowner) or yellow (not — an approval
-//     still counts, it's just not from the required trusted-reviewer team;
-//     yellow rather than gray so it doesn't read as superseded/invalidated)
-//     for the symbol, but its username tag stays colored either way, since
-//     the approval itself is still currently valid.
-//
-// reviewEventGlyph returns the base (uncolored) symbol for a review event's
-// state, used for superseded entries where both symbol and username end up
-// gray regardless of which glyph it is.
-func reviewEventGlyph(state ReviewState) string {
-	if state == ReviewApproved {
-		return "✓"
-	}
-	return "✗"
-}
-
+//     is grayed out entirely: gray symbol AND gray username, keeping the
+//     reviewMark glyph so it still reads as the same kind of review.
+//   - A current ChangesRequested shows the changes mark, with a colored name.
+//   - A current trusted (IsCodeowner) approval shows the trusted mark and its
+//     name in italics, to set trusted reviewers apart at a glance.
+//   - Any other current approval shows the regular mark with a plain colored
+//     name (it still counts, just not from the trusted-reviewer team).
 func renderReviewStatusLine(ev ReviewEvent, innerWidth int) []string {
+	glyph, color := reviewMark(ev)
 	var symbol, usernameRendered string
 	switch {
 	case ev.Superseded:
-		symbol = styleGray.Render(reviewEventGlyph(ev.State))
+		symbol = styleGray.Render(glyph)
 		usernameRendered = styleGray.Render(ev.Login)
-	case ev.State == ReviewChangesRequested:
-		symbol = styleChangesRequested.Render("✗")
-		usernameRendered = usernameColored(ev.Login)
-	case ev.IsCodeowner:
-		symbol = styleApproved.Render("✓")
-		usernameRendered = usernameColored(ev.Login)
+	case ev.IsCodeowner && ev.State != ReviewChangesRequested:
+		symbol = lipgloss.NewStyle().Foreground(color).Render(glyph)
+		usernameRendered = usernameColoredItalic(ev.Login)
 	default:
-		symbol = styleWeakApproved.Render("✓")
+		symbol = lipgloss.NewStyle().Foreground(color).Render(glyph)
 		usernameRendered = usernameColored(ev.Login)
 	}
 	left := detailRowIndent + symbol + " " + usernameRendered
@@ -1571,10 +1570,26 @@ func truncateLogin(login string) string {
 // punctuation/spacing fits their context (a colon before comment text, a
 // trailing space before a commit message, etc).
 func usernameColored(login string) string {
+	return usernameStyled(login, false)
+}
+
+// usernameColoredItalic is usernameColored with the name italicized — used to
+// set a trusted (codeowner) reviewer's name apart in the Review Status section.
+func usernameColoredItalic(login string) string {
+	return usernameStyled(login, true)
+}
+
+// usernameStyled renders login in that user's unique color (see usernameColored),
+// optionally italicized, or "" if login is empty.
+func usernameStyled(login string, italic bool) string {
 	if login == "" {
 		return ""
 	}
-	return lipgloss.NewStyle().Foreground(usernameColor(displayLogin(login))).Render(truncateLogin(login))
+	st := lipgloss.NewStyle().Foreground(usernameColor(displayLogin(login)))
+	if italic {
+		st = st.Italic(true)
+	}
+	return st.Render(truncateLogin(login))
 }
 
 // usernameTag renders "<login> " in that user's unique color, or "" if login
@@ -1719,32 +1734,74 @@ func reviewStateLabel(state ReviewState) string {
 	}
 }
 
-// renderFooter renders the footer keymap hints as a subtle, backgroundless
-// line (blending into the rest of the TUI rather than standing out as a
-// distinct bar), right-aligned within width with a leftMargin-sized gap on
-// the right edge (mirroring the gap used on the left elsewhere) — falling
-// back to a plain leftMargin-indented (effectively left-aligned) line if the
-// terminal is too narrow to fit the full right-aligned form.
-func renderFooter(width int) string {
-	// Only the essentials live in the footer now; the full keymap is in the
-	// floating "?" help overlay (see renderHelpOverlay).
+// renderFooter renders the footer line: a left-aligned status slot and the
+// right-aligned essential keymap hints, on a single line. The left slot shows
+// the spinner + "Refreshing…" while a fetch is in flight, otherwise the "As of
+// X ago" freshness note — the two share the slot, so only one shows at a time.
+// The (LIVE ON/OFF) indicator is appended to whichever is showing, so it's
+// always visible ("LIVE ON" green, "LIVE OFF" red). The full keymap is in the
+// floating "?" help overlay; only the essentials live here. If the terminal is
+// too narrow to fit both sides, the hints are dropped so the status slot is
+// never pushed onto a second line (bodyHeight assumes a one-line footer).
+func (m Model) renderFooter() string {
+	width := m.width
+
+	// Left slot: refreshing indicator or freshness note (mutually exclusive).
+	var lead string
+	if m.loading {
+		lead = m.spinner.View() + styleFooterHint.Render(" Refreshing…")
+	} else {
+		lead = styleFooterHint.Render("As of " + footerAge(m.lastFetch))
+	}
+
+	// Always-visible live-refresh indicator, appended to whichever lead shows.
+	// The whole "(LIVE ON/OFF)" takes the indicator color — green on, red off.
+	liveLabel := "OFF"
+	liveStyle := styleChangesRequested
+	if m.liveRefresh {
+		liveLabel = "ON"
+		liveStyle = styleApproved
+	}
+	live := " " + liveStyle.Render("(LIVE "+liveLabel+")")
+
+	left := leftMarginStr() + lead + live
+
+	// Right: the essential hints.
 	hints := []struct{ label, key string }{
 		{"Toggle Done", "Enter"},
 		{"Toggle Ignore", "i"},
 		{"Help", "?"},
 		{"Quit", "q"},
 	}
-
 	parts := make([]string, len(hints))
 	for i, h := range hints {
 		parts[i] = styleFooterHint.Render(fmt.Sprintf("%s (%s)", h.label, h.key))
 	}
+	right := strings.Join(parts, styleFooterHint.Render("   "))
 
-	content := strings.Join(parts, styleFooterHint.Render("   "))
-
-	pad := width - leftMargin - lipgloss.Width(content)
-	if pad < leftMargin {
-		pad = leftMargin
+	// Lay out left ... right on one line, with a leftMargin-sized gap on the
+	// right edge (mirroring the left). If there isn't room for both, keep the
+	// status slot and drop the hints rather than wrapping.
+	pad := width - lipgloss.Width(left) - lipgloss.Width(right) - leftMargin
+	if pad < 1 {
+		return left
 	}
-	return strings.Repeat(" ", pad) + content
+	return left + strings.Repeat(" ", pad) + right
+}
+
+// footerAge formats the age of the currently-shown data for the footer note.
+// Unlike relativeTime it resolves the sub-minute range to seconds (so the note
+// visibly ticks up), and reports "never" when no fetch has landed yet.
+func footerAge(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	d := time.Since(t)
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return pluralAgo(int(d/time.Second), "second")
+	}
+	return relativeTime(t)
 }

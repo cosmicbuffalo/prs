@@ -44,6 +44,32 @@ func transitionTickCmd(epoch int) tea.Cmd {
 	})
 }
 
+// liveRefreshTickMsg fires when a live-refresh interval elapses. epoch is
+// compared against Model.liveRefreshEpoch so a stale tick (from a countdown
+// that was since reset or toggled off) is ignored.
+type liveRefreshTickMsg struct {
+	epoch int
+}
+
+// liveRefreshTickCmd schedules the next live-refresh tick one interval out,
+// tagged with the given epoch.
+func liveRefreshTickCmd(epoch int) tea.Cmd {
+	return tea.Tick(liveRefreshInterval, func(time.Time) tea.Msg {
+		return liveRefreshTickMsg{epoch: epoch}
+	})
+}
+
+// clockTickMsg fires once a second purely to trigger a re-render, keeping the
+// footer's "As of X ago" note current without any user input.
+type clockTickMsg struct{}
+
+// clockTickCmd schedules the next clock tick.
+func clockTickCmd() tea.Cmd {
+	return tea.Tick(clockTickInterval, func(time.Time) tea.Msg {
+		return clockTickMsg{}
+	})
+}
+
 // Update is the Bubble Tea update function.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -86,8 +112,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.hasData {
 			if store, err := LoadStore(msg.user); err == nil {
 				m.store = store
-				if cached, ok := LoadCache(msg.repo, msg.user); ok {
+				if cached, savedAt, ok := LoadCache(msg.repo, msg.user); ok {
 					m.classify(cached)
+					m.lastFetch = savedAt
 					m.hasData = true
 				}
 			}
@@ -110,6 +137,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		m.store = msg.store
+		m.lastFetch = time.Now()
 		// A refresh reclassifies everything; any mid-flight telegraphed toggles
 		// would be pointing at now-stale data, so drop them. Their pending tick
 		// timers find no matching epoch and are ignored.
@@ -155,6 +183,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, transitionTickCmd(t.epoch)
+
+	case liveRefreshTickMsg:
+		// Ignore a tick that's been superseded — live refresh was toggled off,
+		// or the countdown was re-armed (manual/auto refresh) with a newer epoch.
+		if !m.liveRefresh || msg.epoch != m.liveRefreshEpoch {
+			return m, nil
+		}
+		// A fetch is already running (e.g. a slow refresh outlasting the
+		// interval); don't stack a second one — just re-arm for the next cycle.
+		if m.loading {
+			cmd := m.armLiveRefresh()
+			return m, cmd
+		}
+		return m.beginRefresh()
+
+	case clockTickMsg:
+		// A no-op beyond rescheduling: View() re-runs after every message, so
+		// this keeps the footer's "As of X ago" note ticking up once a second.
+		return m, clockTickCmd()
 
 	case tea.KeyMsg:
 		tm, cmd := m.handleKey(msg)
@@ -269,10 +316,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.loading {
 			return m, nil
 		}
-		m.loading = true
-		m.err = nil
-		m.transitions = nil
-		return m, tea.Batch(m.spinner.Tick, resolveRepoUserCmd(m.repoOverride, m.userOverride))
+		return m.beginRefresh()
+	}
+
+	// Live-refresh toggle ("R"). Handled before the initial-load guard below so
+	// it works even while the very first fetch is still running.
+	if key.Matches(msg, m.keys.LiveRefresh) {
+		m.liveRefresh = !m.liveRefresh
+		m.statusEpoch++
+		epoch := m.statusEpoch
+		if m.liveRefresh {
+			m.statusMsg = "Live refresh on"
+			tick := m.armLiveRefresh()
+			return m, tea.Batch(tick, clearStatusCmd(epoch))
+		}
+		// Turned off: bump the epoch so any already-scheduled tick is ignored.
+		m.liveRefreshEpoch++
+		m.statusMsg = "Live refresh off"
+		return m, clearStatusCmd(epoch)
 	}
 
 	if m.loading && !m.hasData {
@@ -340,6 +401,37 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// armLiveRefresh (re)starts the live-refresh countdown: it bumps
+// liveRefreshEpoch — invalidating any tick already scheduled against the old
+// epoch — and returns a command firing the next tick one interval out. Returns
+// nil (and does nothing) when live refresh is off. Bumping the epoch is what
+// makes a manual/auto refresh "reset" the countdown rather than let two ticks
+// race.
+func (m *Model) armLiveRefresh() tea.Cmd {
+	if !m.liveRefresh {
+		return nil
+	}
+	m.liveRefreshEpoch++
+	return liveRefreshTickCmd(m.liveRefreshEpoch)
+}
+
+// beginRefresh starts a full refresh (repo/user resolve + fetch pipeline),
+// exactly as the "r" key does, and re-arms the live-refresh countdown so the
+// next automatic refresh is a full interval after this one. Shared by the "r"
+// key and the live-refresh tick. The model is mutated (loading flag, epoch)
+// before it's read into the return value to avoid depending on Go's return-
+// value evaluation order.
+func (m Model) beginRefresh() (tea.Model, tea.Cmd) {
+	m.loading = true
+	m.err = nil
+	m.transitions = nil
+	cmds := []tea.Cmd{m.spinner.Tick, resolveRepoUserCmd(m.repoOverride, m.userOverride)}
+	if tick := m.armLiveRefresh(); tick != nil {
+		cmds = append(cmds, tick)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // moveCursor shifts the current tab's cursor by delta, clamped to the

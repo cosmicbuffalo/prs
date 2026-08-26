@@ -8,19 +8,20 @@ import "github.com/charmbracelet/bubbles/key"
 // are hardcoded strings, not derived from these bindings) intentionally
 // keep showing only the arrows.
 type KeyMap struct {
-	Up         key.Binding
-	Down       key.Binding
-	Left       key.Binding
-	Right      key.Binding
-	Toggle     key.Binding
-	Ignore     key.Binding
-	Copy       key.Binding
-	Refresh    key.Binding
-	ScrollUp   key.Binding
-	ScrollDown key.Binding
-	Layout     key.Binding
-	Help       key.Binding
-	Quit       key.Binding
+	Up          key.Binding
+	Down        key.Binding
+	Left        key.Binding
+	Right       key.Binding
+	Toggle      key.Binding
+	Ignore      key.Binding
+	Copy        key.Binding
+	Refresh     key.Binding
+	LiveRefresh key.Binding
+	ScrollUp    key.Binding
+	ScrollDown  key.Binding
+	Layout      key.Binding
+	Help        key.Binding
+	Quit        key.Binding
 }
 
 // DefaultKeyMap returns the app's standard key bindings.
@@ -60,6 +61,13 @@ func DefaultKeyMap() KeyMap {
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
 			key.WithHelp("r", "refresh"),
+		),
+		// Capital "R" toggles the live (auto) refresh — periodic background
+		// re-fetch (see liveRefreshInterval). Distinct from lowercase "r"'s
+		// one-shot refresh; on by default.
+		LiveRefresh: key.NewBinding(
+			key.WithKeys("R"),
+			key.WithHelp("R", "toggle live refresh"),
 		),
 		// Scroll the detail (right) panel when its content is taller than
 		// the available height. Vim-style ctrl+d/ctrl+u, chosen because

@@ -20,6 +20,17 @@ const (
 // error) stays visible before auto-clearing.
 const statusDuration = 2 * time.Second
 
+// liveRefreshInterval is how often live (auto) refresh re-fetches everything
+// in the background when enabled (toggled with "R"). Each refresh — automatic
+// or a manual "r" — re-arms this countdown, so it's really "refresh N after
+// the most recent refresh of any kind".
+const liveRefreshInterval = 5 * time.Minute
+
+// clockTickInterval is how often a no-op tick fires purely to re-render, so the
+// footer's "As of X ago" freshness note stays current to the second without
+// any user input.
+const clockTickInterval = time.Second
+
 // layoutMode selects how the list and detail panels are arranged.
 type layoutMode int
 
@@ -110,6 +121,21 @@ type Model struct {
 	loading bool
 	spinner spinner.Model
 
+	// liveRefresh enables periodic background re-fetching (toggled with "R",
+	// on by default). liveRefreshEpoch is a monotonic id allocator for the
+	// live-refresh tick timer: every (re)arm bumps it, so a stale tick from a
+	// since-toggled-off or reset countdown is matched by epoch and ignored
+	// (the same "epoch counter" pattern used for transitions/statusMsg).
+	liveRefresh      bool
+	liveRefreshEpoch int
+
+	// lastFetch is when the currently-shown data was fetched — set on each
+	// successful fetch (and seeded from the cache's SavedAt on cold start).
+	// The footer's "As of X ago" note is computed from it. A failed refresh
+	// leaves it untouched, since the data on screen is still as of the last
+	// success.
+	lastFetch time.Time
+
 	// hasData is true once the list/detail panels have ever shown real
 	// content — either a cached result loaded instantly on startup, or a
 	// completed fresh fetch. Once true, it stays true: a later "r" refresh
@@ -194,15 +220,26 @@ func NewModel(repoOverride, userOverride string) Model {
 		repoOverride: repoOverride,
 		userOverride: userOverride,
 		loading:      true,
+		liveRefresh:  true,
 		spinner:      sp,
 		activeTab:    tabOutstanding,
 	}
 }
 
 // Init starts the spinner animation and kicks off repo/user resolution (the
-// first of two sequential steps — see repoUserResolvedMsg).
+// first of two sequential steps — see repoUserResolvedMsg). It also seeds the
+// once-a-second clock tick (keeping the footer freshness note current) and, if
+// live refresh is enabled, the first auto-refresh tick.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, resolveRepoUserCmd(m.repoOverride, m.userOverride))
+	cmds := []tea.Cmd{
+		m.spinner.Tick,
+		resolveRepoUserCmd(m.repoOverride, m.userOverride),
+		clockTickCmd(),
+	}
+	if m.liveRefresh {
+		cmds = append(cmds, liveRefreshTickCmd(m.liveRefreshEpoch))
+	}
+	return tea.Batch(cmds...)
 }
 
 // repoUserResolvedMsg is emitted as soon as the repo/user are known — this

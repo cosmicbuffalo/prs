@@ -25,6 +25,15 @@ func main() {
 		return
 	}
 
+	// Load user config (colors/glyphs). Best-effort: a missing config is normal
+	// and a malformed one shouldn't stop the TUI from opening — warn and fall
+	// back to the built-in defaults.
+	cfg, err := LoadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "prs:", err, "(using defaults)")
+	}
+	cfg.apply()
+
 	p := tea.NewProgram(NewModel(*repo, *user), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "prs:", err)
