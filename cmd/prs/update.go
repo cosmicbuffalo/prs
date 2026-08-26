@@ -70,6 +70,26 @@ func clockTickCmd() tea.Cmd {
 	})
 }
 
+// updateCheckMsg carries the latest release tag found by the background startup
+// update check (empty on any error, which is treated silently — a failed check
+// just means no notice).
+type updateCheckMsg struct {
+	latest string
+}
+
+// checkUpdateCmd resolves the latest release tag (cached; see latestTagCached)
+// off the UI goroutine and reports it back. Errors are swallowed into an empty
+// tag so a network blip never surfaces to the user.
+func checkUpdateCmd() tea.Cmd {
+	return func() tea.Msg {
+		latest, err := latestTagCached(time.Now())
+		if err != nil {
+			return updateCheckMsg{}
+		}
+		return updateCheckMsg{latest: latest}
+	}
+}
+
 // Update is the Bubble Tea update function.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -202,6 +222,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A no-op beyond rescheduling: View() re-runs after every message, so
 		// this keeps the footer's "As of X ago" note ticking up once a second.
 		return m, clockTickCmd()
+
+	case updateCheckMsg:
+		if msg.latest != "" && isNewer(version, msg.latest) {
+			m.updateAvailable = msg.latest
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		tm, cmd := m.handleKey(msg)

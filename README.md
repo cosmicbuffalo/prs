@@ -28,6 +28,19 @@ make install     # builds and installs to ~/.local/bin/prs
 make uninstall   # removes it
 ```
 
+### Updating
+
+Update in place with the built-in command — no need to re-run the installer:
+
+```bash
+prs update           # download & install the latest release
+prs update --check   # report whether an update is available, without installing
+prs update --force   # reinstall even if you're already current (repair)
+prs update 0.1.3     # install a specific version (pin or downgrade)
+```
+
+It downloads the release binary for your platform, verifies its checksum, and atomically swaps it in place (following the `~/.local/bin/prs` symlink to its target). `$PRS_VERSION` works too, mirroring the installer. On startup `prs` also does a cached, once-a-day background check and shows a subtle `⬆ vX.Y.Z available · prs update` note in the footer when a newer release is out — turn that off with `updates.check` in your [config](#configuration).
+
 ## Usage
 
 Run it from inside a git repo with a GitHub remote. The TUI will automatically detect the current github user based on `gh` cli auth.
@@ -133,6 +146,9 @@ Currently it customizes the review marks (colors and glyphs). Colors are any [li
     "trusted_glyph": "⭑",
     "regular_glyph": "✓",
     "changes_glyph": "✗"
+  },
+  "updates": {
+    "check": true
   }
 }
 ```
@@ -140,6 +156,7 @@ Currently it customizes the review marks (colors and glyphs). Colors are any [li
 - `trusted_*` — a codeowner / trusted-reviewer-satisfying approval (default: amber `⭑`)
 - `regular_*` — a valid approval that isn't from the trusted-reviewer team (default: green `✓`)
 - `changes_*` — a change request (default: red `✗`)
+- `updates.check` — whether to check for a newer release on startup and show the footer notice (default: `true`). Set `false` to disable; `prs update` still works on demand.
 
 ## Requirements
 

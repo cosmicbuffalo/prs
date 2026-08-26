@@ -12,7 +12,16 @@ import (
 // Config is the user-editable configuration loaded from config.json at startup.
 // Every field is optional; anything unset keeps its built-in default.
 type Config struct {
-	Review ReviewConfig `json:"review"`
+	Review  ReviewConfig  `json:"review"`
+	Updates UpdatesConfig `json:"updates"`
+}
+
+// UpdatesConfig controls the self-update behavior. Check gates the background
+// startup check that surfaces an "update available" note in the footer; it's a
+// pointer so an omitted field (nil) keeps the default (on) while an explicit
+// `false` turns it off. The `prs update` subcommand always works regardless.
+type UpdatesConfig struct {
+	Check *bool `json:"check"`
 }
 
 // ReviewConfig overrides the colors and glyphs used to render review states in
@@ -108,5 +117,8 @@ func (c Config) apply() {
 	}
 	if v := c.Review.ChangesGlyph; v != "" {
 		reviewChangesGlyph = v
+	}
+	if c.Updates.Check != nil {
+		updateCheckEnabled = *c.Updates.Check
 	}
 }
