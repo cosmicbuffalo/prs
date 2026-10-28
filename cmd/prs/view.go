@@ -127,6 +127,11 @@ func (m Model) renderHeader() string {
 	if user == "" {
 		user = "…"
 	}
+	// Name the gh account only when it isn't the viewed user (i.e. --as_user
+	// is viewing someone else), so the default header stays unchanged.
+	if m.account != "" && !strings.EqualFold(m.account, m.user) {
+		user += " via " + m.account
+	}
 	return leftMarginStr() + styleBold.Render(fmt.Sprintf("Repo: %s (%s)", repo, user))
 }
 
