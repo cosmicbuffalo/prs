@@ -8,6 +8,24 @@ the published release notes.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **Multiple GitHub accounts**: `prs` now picks which logged-in `gh` account to
+  use per repo instead of always using `gh`'s active account. Without config it
+  uses an account that can read the repo, preferring the one whose login is the
+  repo owner, then the one remembered from last time, then (when several can
+  read it) one with commits in the repo, then `gh`'s active account. Pin an account per
+  owner or repo with the new `accounts` config section, or per run with
+  `--account <login>`. The token is passed to `gh` per command, so `gh`'s global
+  active account is never changed. `--as_user` now defaults to the account in
+  use.
+
+### Changed
+- The repo is now detected from the git remotes (respecting
+  `gh repo set-default`) rather than `gh repo view`, so detection no longer
+  fails when the active `gh` account can't see the repo.
+
 ## [0.1.5] - 2026-08-26
 
 ### Added

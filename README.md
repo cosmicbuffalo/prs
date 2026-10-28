@@ -57,10 +57,25 @@ prs --repo owner/name --as_user someone
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--repo` | detected via `gh repo view` in the current directory | `owner/repo` to check |
-| `--as_user` | detected via `gh api user` | GitHub login to view PRs from the perspective of |
+| `--repo` | detected from the current directory's git remotes | `owner/repo` to check |
+| `--account` | see [Multiple GitHub accounts](#multiple-github-accounts) | logged-in `gh` account to make API calls as |
+| `--as_user` | the `gh` account in use | GitHub login to view PRs from the perspective of |
 
 `prs` has no credentials of its own — it shells out to the [GitHub CLI](https://cli.github.com/) (`gh`) for every piece of data. Run `gh auth status` first to make sure you're authenticated.
+
+### Multiple GitHub accounts
+
+If you're logged in to more than one account with `gh` (e.g. personal and work), `prs` picks the right one per repo without you switching `gh`'s active account. In order:
+
+1. `GH_TOKEN` / `GITHUB_TOKEN`, if already set in your environment.
+2. `--account <login>`.
+3. A pin in the `accounts` section of your [config](#configuration).
+4. Otherwise it auto-detects among the accounts that can read the repo:
+   - the account whose login is the repo owner (e.g. `me_personal` for `me_personal/dotfiles`);
+   - else the account that won last time for this repo, remembered in `~/.local/state/prs/accounts.json`;
+   - else, if only one account can read the repo, that one; if several can, the first (starting with `gh`'s active account) that has commits in the repo, falling back to the active account.
+
+The chosen account's token is passed to `gh` per command, so your global `gh` setup is left untouched. Auto-detection settles private repos and your own repos on its own; pin an account for public repos owned by someone else where you haven't committed with the account you want. Only `github.com` accounts are considered; other hosts use `gh`'s default.
 
 ## Tabs
 
@@ -149,6 +164,10 @@ Currently it customizes the review marks (colors and glyphs). Colors are any [li
   },
   "updates": {
     "check": true
+  },
+  "accounts": {
+    "my-work-org": "me_work",
+    "someone/public-repo": "me_personal"
   }
 }
 ```
@@ -157,6 +176,7 @@ Currently it customizes the review marks (colors and glyphs). Colors are any [li
 - `regular_*` — a valid approval that isn't from the trusted-reviewer team (default: green `✓`)
 - `changes_*` — a change request (default: red `✗`)
 - `updates.check` — whether to check for a newer release on startup and show the footer notice (default: `true`). Set `false` to disable; `prs update` still works on demand.
+- `accounts` — which logged-in `gh` account to use, keyed by `"owner"` or `"owner/repo"` (an exact repo beats its owner; case-insensitive). Repos without a pin are auto-detected — see [Multiple GitHub accounts](#multiple-github-accounts).
 
 ## Requirements
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -440,10 +441,20 @@ func primaryCodeownersTeams(raw string) []string {
 	return teams
 }
 
-// runGH shells out to the gh CLI and returns its stdout, wrapping any error
-// with the command's stderr output for debuggability.
+// runGH shells out to the gh CLI as the resolved account (see
+// ResolveAccount) and returns its stdout, wrapping any error with the
+// command's stderr output for debuggability.
 func runGH(ctx context.Context, args ...string) ([]byte, error) {
+	return runGHAs(ctx, getActiveToken(), args...)
+}
+
+// runGHAs is runGH with an explicit token: non-empty runs gh with it as
+// GH_TOKEN, empty lets gh use its own stored/default credentials.
+func runGHAs(ctx context.Context, token string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "gh", args...)
+	if token != "" {
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -453,11 +464,15 @@ func runGH(ctx context.Context, args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// RepoFromCwd returns override if non-empty, else detects "owner/repo" via
-// `gh repo view --json nameWithOwner -q .nameWithOwner`.
+// RepoFromCwd returns override if non-empty, else detects "owner/repo" from
+// the git remotes (see repoFromGitRemote), falling back to
+// `gh repo view --json nameWithOwner -q .nameWithOwner` when no remote parses.
 func RepoFromCwd(ctx context.Context, override string) (string, error) {
 	if override != "" {
 		return override, nil
+	}
+	if repo, err := repoFromGitRemote(ctx); err == nil {
+		return repo, nil
 	}
 	out, err := runGH(ctx, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
 	if err != nil {
@@ -470,11 +485,14 @@ func RepoFromCwd(ctx context.Context, override string) (string, error) {
 	return repo, nil
 }
 
-// CurrentUser returns override if non-empty, else detects the login via
-// `gh api user -q .login`.
-func CurrentUser(ctx context.Context, override string) (string, error) {
+// CurrentUser returns override if non-empty, else the resolved gh account's
+// login (accountLogin), else detects the login via `gh api user -q .login`.
+func CurrentUser(ctx context.Context, override, accountLogin string) (string, error) {
 	if override != "" {
 		return override, nil
+	}
+	if accountLogin != "" {
+		return accountLogin, nil
 	}
 	out, err := runGH(ctx, "api", "user", "-q", ".login")
 	if err != nil {

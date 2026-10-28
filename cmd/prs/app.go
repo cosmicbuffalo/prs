@@ -106,15 +106,19 @@ type transition struct {
 type Model struct {
 	keys KeyMap
 
-	// repoOverride / userOverride are the --repo / --as_user flag values,
-	// threaded through to RepoFromCwd / CurrentUser on every fetch.
-	repoOverride string
-	userOverride string
+	// repoOverride / userOverride / accountOverride are the --repo /
+	// --as_user / --account flag values, threaded through to RepoFromCwd /
+	// CurrentUser / ResolveAccount on every fetch.
+	repoOverride    string
+	userOverride    string
+	accountOverride string
 
 	// repo / user are the resolved values from the most recent successful
-	// fetch, used for header display and the loading message.
-	repo string
-	user string
+	// fetch, used for header display and the loading message. account is the
+	// gh login the API calls run as ("" when gh's own default applies).
+	repo    string
+	user    string
+	account string
 
 	store *Store
 
@@ -215,19 +219,20 @@ type Model struct {
 
 // NewModel builds the initial Model, ready to be handed to tea.NewProgram.
 // The fetch itself doesn't happen until Init() runs.
-func NewModel(repoOverride, userOverride string) Model {
+func NewModel(repoOverride, userOverride, accountOverride string) Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = spinnerStyle
 
 	return Model{
-		keys:         DefaultKeyMap(),
-		repoOverride: repoOverride,
-		userOverride: userOverride,
-		loading:      true,
-		liveRefresh:  true,
-		spinner:      sp,
-		activeTab:    tabOutstanding,
+		keys:            DefaultKeyMap(),
+		repoOverride:    repoOverride,
+		userOverride:    userOverride,
+		accountOverride: accountOverride,
+		loading:         true,
+		liveRefresh:     true,
+		spinner:         sp,
+		activeTab:       tabOutstanding,
 	}
 }
 
@@ -238,7 +243,7 @@ func NewModel(repoOverride, userOverride string) Model {
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.spinner.Tick,
-		resolveRepoUserCmd(m.repoOverride, m.userOverride),
+		resolveRepoUserCmd(m.repoOverride, m.userOverride, m.accountOverride),
 		clockTickCmd(),
 	}
 	if m.liveRefresh {
@@ -258,14 +263,18 @@ func (m Model) Init() tea.Cmd {
 // the fetch pipeline, so the header can show "Repo: owner/name" right away
 // instead of waiting on the much slower GitHub API calls in fetchAllCmd.
 type repoUserResolvedMsg struct {
-	repo string
-	user string
-	err  error
+	repo    string
+	user    string
+	account string
+	err     error
 }
 
-// resolveRepoUserCmd resolves the repo and user. It's used both for the
-// initial load (from Init) and for a mid-session refresh (the "r" key).
-func resolveRepoUserCmd(repoOverride, userOverride string) tea.Cmd {
+// resolveRepoUserCmd resolves the repo, the gh account to run as, and the
+// user. It's used both for the initial load (from Init) and for a
+// mid-session refresh (the "r" key). The account is resolved before the user
+// because the user defaults to the account's login, and every later gh call
+// (including CurrentUser's fallback) runs with that account's token.
+func resolveRepoUserCmd(repoOverride, userOverride, accountOverride string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -274,12 +283,19 @@ func resolveRepoUserCmd(repoOverride, userOverride string) tea.Cmd {
 			return repoUserResolvedMsg{err: err}
 		}
 
-		user, err := CurrentUser(ctx, userOverride)
+		acct, err := ResolveAccount(ctx, repo, accountOverride)
 		if err != nil {
 			return repoUserResolvedMsg{repo: repo, err: err}
 		}
+		setActiveToken(acct.Token)
+		repo = acct.Repo
 
-		return repoUserResolvedMsg{repo: repo, user: user}
+		user, err := CurrentUser(ctx, userOverride, acct.Login)
+		if err != nil {
+			return repoUserResolvedMsg{repo: repo, account: acct.Login, err: err}
+		}
+
+		return repoUserResolvedMsg{repo: repo, user: user, account: acct.Login}
 	}
 }
 
