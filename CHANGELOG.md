@@ -10,6 +10,8 @@ and the format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-05
+
 ### Added
 - **Multiple GitHub accounts**: `prs` now picks which logged-in `gh` account to
   use per repo instead of always using `gh`'s active account. Without config it
