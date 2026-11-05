@@ -117,6 +117,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.repo != "" {
 			m.repo = msg.repo
 		}
+		m.account = msg.account
 		if msg.err != nil {
 			m.loading = false
 			m.err = msg.err
@@ -453,7 +454,7 @@ func (m Model) beginRefresh() (tea.Model, tea.Cmd) {
 	m.loading = true
 	m.err = nil
 	m.transitions = nil
-	cmds := []tea.Cmd{m.spinner.Tick, resolveRepoUserCmd(m.repoOverride, m.userOverride)}
+	cmds := []tea.Cmd{m.spinner.Tick, resolveRepoUserCmd(m.repoOverride, m.userOverride, m.accountOverride)}
 	if tick := m.armLiveRefresh(); tick != nil {
 		cmds = append(cmds, tick)
 	}

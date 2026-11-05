@@ -26,7 +26,8 @@ func main() {
 		flag.PrintDefaults()
 	}
 	repo := flag.String("repo", "", "owner/repo override (default: detect from the current git repo)")
-	user := flag.String("as_user", "", "GitHub login whose PR activity to view (default: current gh user)")
+	user := flag.String("as_user", "", "GitHub login whose PR activity to view (default: the gh account in use)")
+	account := flag.String("account", "", "gh account to make API calls as (default: config pin, else the first logged-in account that can read the repo)")
 	showVersion := flag.Bool("version", false, "print the prs version and exit")
 	flag.Parse()
 
@@ -44,7 +45,7 @@ func main() {
 	}
 	cfg.apply()
 
-	p := tea.NewProgram(NewModel(*repo, *user), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(NewModel(*repo, *user, *account), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "prs:", err)
 		os.Exit(1)

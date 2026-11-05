@@ -14,6 +14,10 @@ import (
 type Config struct {
 	Review  ReviewConfig  `json:"review"`
 	Updates UpdatesConfig `json:"updates"`
+	// Accounts pins which logged-in gh account to use per "owner" or
+	// "owner/repo" (exact repo wins), e.g. {"my-org": "me_work"}. Repos with
+	// no pin use the first account that can read them (see ResolveAccount).
+	Accounts map[string]string `json:"accounts"`
 }
 
 // UpdatesConfig controls the self-update behavior. Check gates the background
@@ -120,5 +124,8 @@ func (c Config) apply() {
 	}
 	if c.Updates.Check != nil {
 		updateCheckEnabled = *c.Updates.Check
+	}
+	if len(c.Accounts) > 0 {
+		accountPins = c.Accounts
 	}
 }

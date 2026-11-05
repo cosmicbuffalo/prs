@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
@@ -53,7 +54,7 @@ func TestLoadConfigMissingFileIsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig on a missing file should not error: %v", err)
 	}
-	if cfg != (Config{}) {
+	if !reflect.DeepEqual(cfg, Config{}) {
 		t.Errorf("missing config should yield the zero Config, got %+v", cfg)
 	}
 }
